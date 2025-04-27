@@ -7,6 +7,7 @@ import transformers
 
 from gptq import * 
 from modelutils import *
+from quant.minmaxquant import *
 from quant import *
 
 
@@ -77,7 +78,7 @@ def bloom_sequential(model, dataloader, dev, means=None, stds=None):
         gptq = {}
         for name in subset:
             gptq[name] = GPTQ(subset[name])
-            gptq[name].quantizer = Quantizer()
+            gptq[name].quantizer = QuantileQuantizer()
             gptq[name].quantizer.configure(
                 args.wbits, perchannel=True, sym=args.sym, mse=False
             )
@@ -170,13 +171,14 @@ def bloom_eval(model, testenc, dev):
             for name in subset:
                 quantizer = Quantizer()
                 quantizer.configure(
-                    args.wbits, perchannel=True, sym=args.sym, mse=False
+                    args.wbits #, perchannel=True, sym=args.sym, mse=False
                 )
                 W = subset[name].weight.data
-                quantizer.find_params(W, weight=True)
-                subset[name].weight.data = quantize(
-                    W, quantizer.scale, quantizer.zero, quantizer.maxq
-                ).to(next(iter(layer.parameters())).dtype)
+                quantizer.find_params(W) #, weight=True)
+                subset[name].weight.data =quantizer.quantize(W).to(next(iter(layer.parameters())).dtype)
+                #quantize(
+                 #   W, quantizer.scale, quantizer.zero, quantizer.maxq
+                #).to(next(iter(layer.parameters())).dtype)
 
         for j in range(nsamples):
             outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask, alibi=alibi)[0]

@@ -5,7 +5,7 @@ import torch
 import torch.nn as nn
 import transformers
 
-from quant import *
+from quant.minmaxquant import *
 
 
 DEBUG = False 
@@ -127,9 +127,7 @@ class GPTQ:
                             idx = perm[idx]
                         self.quantizer = groups[idx // groupsize]
 
-                q = quantize(
-                    w.unsqueeze(1), self.quantizer.scale, self.quantizer.zero, self.quantizer.maxq
-                ).flatten()  # NOTE: why would you do this?
+                q = self.quantizer.quantize(w.unsqueeze(1)).flatten()
                 Q1[:, i] = q
                 Losses1[:, i] = (w - q) ** 2 / d ** 2
 

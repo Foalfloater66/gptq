@@ -28,11 +28,11 @@ class Quantizer(nn.Module):
         """Sets up the number of bits, the norm, the grid size, the maxshrink, and the `perchannel`, `sym`, `mse`, and `trits` booleans."""
         self.maxq = torch.tensor(2 ** bits - 1)  # maxmium possible value in a bit.
         self.perchannel = perchannel  # if enabled, for each dimension, the values in the tensor are quantized with different quantization parameters (less errors).
-        self.sym = sym
-        self.mse = mse
-        self.norm = norm
-        self.grid = grid
-        self.maxshrink = maxshrink 
+        self.sym = sym # not needed for us.
+        self.mse = mse # not needed for us.
+        self.norm = norm # only for MSE = True
+        self.grid = grid  # only for MSE = True
+        self.maxshrink = maxshrink  # only for MSE = True
         if trits:
             self.maxq = torch.tensor(-1) 
 
