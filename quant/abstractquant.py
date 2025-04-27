@@ -1,11 +1,12 @@
 import torch.nn as nn
 from abc import ABC, abstractmethod
 
-class Quantizer(ABC, nn.Module):
+class QuantizerInterface(ABC, nn.Module):
     """Quantizer class template interface."""
 
-    def __init__(self, shape=1):
-        pass
+    def __init__(self):
+        super(QuantizerInterface, self).__init__()
+        # pass
 
     @abstractmethod
     def configure(self):
@@ -22,10 +23,10 @@ class Quantizer(ABC, nn.Module):
         """Quantize the matrix `x`."""
         pass
 
-    @abstractmethod
-    def enabled(self):
-        # NOTE: I don't know what this is.
-        pass
+    # @abstractmethod
+    # def enabled(self):
+    #     # NOTE: I don't know what this is.
+    #     pass
 
     @abstractmethod
     def ready(self):

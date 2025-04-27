@@ -5,7 +5,7 @@ import torch.nn as nn
 
 from gptq import *
 from modelutils import *
-from quant import *
+from quant import get_quantizer
 
 
 def get_opt(model):
@@ -21,7 +21,7 @@ def get_opt(model):
     return model
 
 @torch.no_grad()
-def opt_sequential(model, dataloader, dev):
+def opt_sequential(model, dataloader, quantizer_name, dev):
     print('Starting ...')
 
     use_cache = model.config.use_cache
@@ -51,6 +51,8 @@ def opt_sequential(model, dataloader, dev):
             cache['i'] += 1
             cache['attention_mask'] = kwargs['attention_mask']
             raise ValueError
+
+    
     layers[0] = Catcher(layers[0])
     for batch in dataloader:
         try:
@@ -73,6 +75,8 @@ def opt_sequential(model, dataloader, dev):
 
     print('Ready.')
 
+
+    quantizer = get_quantizer(quantizer_name)
     quantizers = {}
     for i in range(len(layers)):
         layer = layers[i].to(dev)
@@ -81,7 +85,7 @@ def opt_sequential(model, dataloader, dev):
         gptq = {}
         for name in subset:
             gptq[name] = GPTQ(subset[name])
-            gptq[name].quantizer = Quantizer()
+            gptq[name].quantizer = quantizer()
             gptq[name].quantizer.configure(
                 args.wbits, perchannel=True, sym=args.sym, mse=False, trits=args.trits
             )
@@ -432,6 +436,12 @@ if __name__ == '__main__':
         '--static-groups', action='store_true',
         help='Whether to use static groups; recommended when using `--actorder` for more efficient inference.'
     )
+    parser.add_argument(
+        '--quantizer', type=str, choices=['uniform_minmax', 'logarithm', 'quantile'],default='uniform_minmax',
+        help="Which parameter quantizer to use.",
+    )
+
+    # NOTE: add the quantizer here.
 
     args = parser.parse_args()
 
@@ -447,7 +457,7 @@ if __name__ == '__main__':
 
     if args.wbits < 16 and not args.nearest:
         tick = time.time()
-        quantizers = opt_sequential(model, dataloader, DEV)
+        quantizers = opt_sequential(model, dataloader, args.quantizer, DEV)
         print(time.time() - tick)
 
     if args.benchmark:

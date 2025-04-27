@@ -5,7 +5,7 @@ import torch.nn as nn
 
 from gptq import *
 from modelutils import *
-from quant import *
+from quant.minmaxquant import *
 
 
 def get_llama(model):

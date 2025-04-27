@@ -1,71 +1,38 @@
-from .abstractquant import Quantizer
+from .abstractquant import QuantizerInterface
 import torch
 
 
-# TODO: fix this later.
-def quantize(x, scale, zero, maxq):
-    if maxq < 0: # only if trits(?) is enabled. Not relevant.
-        return (x > scale / 2).float() * scale + (x < zero / 2).float() * zero
-    q = torch.clamp(torch.round(x / scale) + zero, 0, maxq) # affine quantization scheme.
-    return scale * (q - zero)  # affine quantization scheme: https://huggingface.co/docs/optimum/en/concept_guides/quantization 
-
-class QuantileQuantizer(Quantizer):
+class QuantileQuantizer(QuantizerInterface):
     """Quantile-based quantizer.
-    
+
+    Only supports perchannel weight-only quantization.    
     Notes on usage: Only for perchannel weight-only quantization.
     """
 
     def __init__(self, shape=1):
         super(QuantileQuantizer, self).__init__()
-        # TODO: register the quantiles.
-        self.register_buffer('scale', torch.zeros(shape))
+        self.register_buffer("quantization_lvls", torch.zeros(shape))
 
-    def configure(self, bits):
-        # TODO: TBA
-        # self.perchannel = True
+    def configure(self, bits, **kwargs):
         self.num_levels = 2**bits
-        pass
 
-    def find_params(self, x):
-        # NOTE: must fix later.
-
+    def find_params(self, x, **kwargs):
         dev = x.device
-        shape = x.shape
+        self.quantization_lvls = self.quantization_lvls.to(dev)
 
-        percentiles = [100 * i / (num_levels - 1)]
-
-        # if self.perchannel and weight:
-        x = x.flatten(1)
-        
-        # TODO: may need to remove the below.
-        tmp = torch.zeros(x.shape[0], device=dev)
-        xmin = torch.minimum(x.min(1)[0], tmp)
-        xmax = torch.maximum(x.max(1)[0], tmp)
-
-        tmp = (xmin == 0) & (xmax == 0)
-        xmin[tmp] = -1
-        xmax[tmp] = +1
-
-#  self.zero = torch.round(-xmin / self.scale)
-        self.scale = (xmax - xmin) / self.maxq
-        self.zero = torch.round(-xmin / self.scale)
-
-        shape = [-1] + [1] * (len(shape) - 1)
-        # self.scale = self.scale.unsqueeze(1)
-        # self.zero = self.zero.unsqueeze(1)
-        self.scale = self.scale.reshape(shape)
-        self.zero = self.zero.reshape(shape)
+        quantiles = torch.linspace(0, 1, steps=self.num_levels, device=x.device)
+        self.quantization_lvls = torch.quantile(x.flatten(), quantiles) 
         return
     
     def quantize(self, x):
         if self.ready():
-            # NOTE: why does it need to be done externally? This makes no sense.
-            return quantize(x, self.scale, self.zero, self.maxq)
+            quantization_lvls = self.quantization_lvls
+            x_flat = x.view(-1)
+            diffs = (x_flat.unsqueeze(1) - quantization_lvls.unsqueeze(0)).abs() # absolute difference between the original weights and the quantiles.
+            return quantization_lvls[diffs.argmin(dim=1)].view_as(x)
         return x
     
-    def enabled(self):
-        pass
 
     def ready(self):
-        pass
+        return torch.all(self.quantization_lvls != 0) 
         
