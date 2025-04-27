@@ -4,10 +4,29 @@ import torch.nn as nn
 
 
 def quantize(x, scale, zero, maxq):
-    if maxq < 0: # only if trits(?) is enabled. Not relevant.
-        return (x > scale / 2).float() * scale + (x < zero / 2).float() * zero
-    q = torch.clamp(torch.round(x / scale) + zero, 0, maxq) # affine quantization scheme.
-    return scale * (q - zero)  # affine quantization scheme: https://huggingface.co/docs/optimum/en/concept_guides/quantization 
+    """
+    Applies logarithmic quantization to the input tensor x.
+    Formula: Q(x) = Sign(x) * 2^(round(log2(|x|)))
+
+    Note: The scale, zero, and maxq parameters are ignored in this implementation
+          as they belong to affine quantization. They are kept in the signature
+          for compatibility with the Quantizer class and GPTQ.fasterquant calls.
+    """
+    sign = torch.sign(x)
+    abs_x = torch.abs(x)
+    q = torch.zeros_like(x)
+
+    # Create mask for non-zero elements to avoid log2(0)
+    non_zero_mask = abs_x > 1e-9 # use a small epsilon to avoid issues with very small numbers
+    # Calculate log2 of absolute values for non-zero elements
+    log2_abs_x = torch.log2(abs_x[non_zero_mask])
+
+    rounded_log2 = torch.round(log2_abs_x)
+    pow2_rounded_log2 = torch.pow(2.0, rounded_log2)
+
+    q[non_zero_mask] = sign[non_zero_mask] * pow2_rounded_log2
+
+    return q
 
 # TODO (@Morgane): separate into different classes for different types of quantization.
 class Quantizer(nn.Module):
