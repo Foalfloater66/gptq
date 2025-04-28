@@ -10,8 +10,8 @@ def set_seed(seed):
 def get_wikitext2(nsamples, seed, seqlen, model):
     from datasets import load_dataset
     # Added ignore_verifications=True to bypass checksum errors
-    traindata = load_dataset('wikitext', 'wikitext-2-raw-v1', split='train', ignore_verifications=True)
-    testdata = load_dataset('wikitext', 'wikitext-2-raw-v1', split='test', ignore_verifications=True)
+    traindata = load_dataset('wikitext', 'wikitext-2-raw-v1', split='train')
+    testdata = load_dataset('wikitext', 'wikitext-2-raw-v1', split='test')
 
     from transformers import AutoTokenizer 
     tokenizer = AutoTokenizer.from_pretrained(model, use_fast=False)
