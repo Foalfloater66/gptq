@@ -137,19 +137,28 @@ class GPTQ:
                             idx = perm[idx]
                         self.quantizer = groups[idx // groupsize]
 
-                q = self.quantizer.quantize(w.unsqueeze(1)).flatten()
+                # Unpack quantized value and exponent if LogQuantizer, else just get q
+                quantized_output = self.quantizer.quantize(w.unsqueeze(1))
+                if LogQuantizer is not None and isinstance(self.quantizer, LogQuantizer):
+                    q, exponent = quantized_output
+                    q = q.flatten()
+                    exponent = exponent.flatten() # Flatten exponent too
+                else:
+                    q = quantized_output.flatten()
+                    exponent = None # No exponent for other quantizers
+
                 Q1[:, i] = q
                 Losses1[:, i] = (w - q) ** 2 / d ** 2
 
                 # NOTE: Error compensation step - applying conditionally scaled error for LogQuantizer
                 err1 = (w - q) / d
 
-                # Conditionally scale the error if using LogQuantizer and power is non-zero
-                if LogQuantizer is not None and isinstance(self.quantizer, LogQuantizer) and log_error_scale_power != 0.0:
-                    epsilon = 1e-9 # Small value to prevent division by zero or log(0) issues
-                    # Ensure q is on the same device as err1
-                    q_dev = q.to(err1.device) 
-                    scaling_factor = (torch.abs(q_dev) + epsilon) ** (-log_error_scale_power)
+                # Conditionally scale the error if using LogQuantizer and power is non-zero, now using exponent
+                if exponent is not None and log_error_scale_power != 0.0:
+                    # Scale based on the absolute value of the exponent + 1
+                    # Adding 1 avoids issues with exponent 0 and keeps scaling monotonic
+                    exponent_dev = exponent.to(err1.device) # Ensure device match
+                    scaling_factor = (torch.abs(exponent_dev) + 1.0) ** (-log_error_scale_power)
                     err1_scaled = err1 * scaling_factor
                     # Use scaled error for the update
                     W1[:, i:] -= err1_scaled.unsqueeze(1).matmul(Hinv1[i, i:].unsqueeze(0))

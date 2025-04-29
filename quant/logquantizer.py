@@ -98,9 +98,16 @@ class LogQuantizer(QuantizerInterface):
             # Calculate the final power-of-2 value using the clamped exponent
             pow2_clamped_log2 = torch.pow(2.0, clamped_log2)
             q[non_zero_mask] = sign_nz * pow2_clamped_log2
+            # Store the clamped exponent for non-zero elements (initialize exponent tensor)
+            clamped_log2_full = torch.zeros_like(x, dtype=clamped_log2.dtype) 
+            clamped_log2_full[non_zero_mask] = clamped_log2
+        else:
+            # Handle case where all inputs are zero or below threshold
+            clamped_log2_full = torch.zeros_like(x) # Or handle appropriately
         # --- End non-zero calculation ---
 
-        return q.to(x.dtype) # Ensure output dtype matches input
+        # Return both the quantized value and the clamped exponent
+        return q.to(x.dtype), clamped_log2_full.to(x.device)
 
 
     def ready(self):
