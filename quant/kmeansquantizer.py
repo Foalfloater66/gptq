@@ -59,10 +59,18 @@ class KMeansQuantizer(QuantizerInterface):
             new_centroids = torch.zeros_like(centroids)
             counts = torch.zeros(self.k, device=dev)
 
-            # Efficiently update centroids using scatter_add_ (or index_add_)
-            assignments_expanded = assignments.unsqueeze(1).expand_as(x_flat)
-            new_centroids.scatter_add_(0, assignments_expanded, x_flat)
-            counts.scatter_add_(0, assignments, torch.ones_like(assignments, dtype=torch.float))
+            # Efficiently update centroids using scatter_add_
+            # 'assignments' has shape [N, 1] after argmin on dim=1 of [N, k, 1]
+            # 'x_flat' has shape [N, 1]
+            # 'new_centroids' has shape [k, 1]
+            # We scatter along dim 0 using 'assignments' as index and 'x_flat' as source.
+            # The index tensor 'assignments' must have the same number of dimensions as the src 'x_flat'.
+            new_centroids.scatter_add_(0, assignments, x_flat)
+            
+            # For counts (shape [k]), the index needs to be 1D [N]. Squeeze assignments.
+            # The source 'ones' also needs to be 1D [N].
+            ones_for_counts = torch.ones(assignments.shape[0], device=dev, dtype=torch.float)
+            counts.scatter_add_(0, assignments.squeeze(1), ones_for_counts)
 
             # Avoid division by zero for empty clusters - keep old centroid
             mask_empty = counts == 0
