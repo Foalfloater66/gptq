@@ -47,8 +47,10 @@ class KMeansQuantizer(QuantizerInterface):
         # Iterative K-Means
         for i in range(self.max_kmeans_iter):
             # Assign points to nearest centroid
-            diffs = torch.abs(x_flat.unsqueeze(1) - centroids.unsqueeze(0)) # Shape: (n_samples, k)
-            assignments = torch.argmin(diffs, dim=1) # Shape: (n_samples)
+            # diffs shape will be (n_samples, k, 1) due to broadcasting
+            diffs = torch.abs(x_flat.unsqueeze(1) - centroids.unsqueeze(0))
+            # assignments should be 1D [n_samples], use keepdim=False
+            assignments = torch.argmin(diffs, dim=1, keepdim=False) # Shape: [n_samples]
 
             # Store old centroids for convergence check
             old_centroids = centroids.clone()
