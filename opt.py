@@ -106,7 +106,11 @@ def opt_sequential(model, dataloader, quantizer_name, dev):
             print(i, name)
             print('Quantizing ...')
             gptq[name].fasterquant(
-                percdamp=args.percdamp, groupsize=args.groupsize, actorder=args.act_order, static_groups=args.static_groups
+                percdamp=args.percdamp, 
+                groupsize=args.groupsize, 
+                actorder=args.act_order, 
+                static_groups=args.static_groups,
+                log_error_scale_power=args.log_error_scale_power # Pass the new arg
             )
             quantizers['model.decoder.layers.%d.%s' % (i, name)] = gptq[name].quantizer
             gptq[name].free()
@@ -440,8 +444,10 @@ if __name__ == '__main__':
         '--quantizer', type=str, choices=['uniform_minmax', 'logarithm', 'quantile'],default='uniform_minmax',
         help="Which parameter quantizer to use.",
     )
-
-    # NOTE: add the quantizer here.
+    parser.add_argument(
+        '--log-error-scale-power', type=float, default=0.0,
+        help='Power p for scaling log quant error: err_scaled = err * (|q|+eps)^(-p). Default 0.0 (no scaling).'
+    )
 
     args = parser.parse_args()
 

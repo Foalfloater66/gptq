@@ -58,8 +58,18 @@ class GPTQ:
         self.H += inp.matmul(inp.t())
 
     def fasterquant(
-        self, blocksize=128, percdamp=.01, groupsize=-1, actorder=False, static_groups=False
+        self, blocksize=128, percdamp=.01, groupsize=-1, actorder=False, static_groups=False,
+        log_error_scale_power=0.0 # Add new parameter with default
     ):
+        # Import LogQuantizer locally to check its type without circular dependency issues
+        # (assuming logquantizer.py is in the same directory or accessible)
+        # This might need adjustment based on your project structure.
+        # A cleaner way might be to pass a flag or use a property on the quantizer object itself.
+        try:
+            from quant.logquantizer import LogQuantizer
+        except ImportError:
+            LogQuantizer = None # Handle case where it might not be available
+
         W = self.layer.weight.data.clone()
         if isinstance(self.layer, nn.Conv2d):
             W = W.flatten(1)
@@ -131,10 +141,23 @@ class GPTQ:
                 Q1[:, i] = q
                 Losses1[:, i] = (w - q) ** 2 / d ** 2
 
-                # NOTE: Error compensation step - unclear if it works for other quantization schemes 
+                # NOTE: Error compensation step - applying conditionally scaled error for LogQuantizer
                 err1 = (w - q) / d
-                W1[:, i:] -= err1.unsqueeze(1).matmul(Hinv1[i, i:].unsqueeze(0))
-                Err1[:, i] = err1 
+
+                # Conditionally scale the error if using LogQuantizer and power is non-zero
+                if LogQuantizer is not None and isinstance(self.quantizer, LogQuantizer) and log_error_scale_power != 0.0:
+                    epsilon = 1e-9 # Small value to prevent division by zero or log(0) issues
+                    # Ensure q is on the same device as err1
+                    q_dev = q.to(err1.device) 
+                    scaling_factor = (torch.abs(q_dev) + epsilon) ** (-log_error_scale_power)
+                    err1_scaled = err1 * scaling_factor
+                    # Use scaled error for the update
+                    W1[:, i:] -= err1_scaled.unsqueeze(1).matmul(Hinv1[i, i:].unsqueeze(0))
+                    Err1[:, i] = err1_scaled # Store the scaled error
+                else:
+                    # Use original error for other quantizers or if scaling is disabled
+                    W1[:, i:] -= err1.unsqueeze(1).matmul(Hinv1[i, i:].unsqueeze(0))
+                    Err1[:, i] = err1 # Store the original error
 
             Q[:, i1:i2] = Q1
             Losses[:, i1:i2] = Losses1 / 2
