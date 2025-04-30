@@ -70,9 +70,9 @@ ACT_BITS = 8 # Define bitwidth for activation range
 
 # 1. Create Random Packed Weight Components
 print(f"Generating random packed kernel inputs ({LOG_BITS}bW / {ACT_BITS}bA equivalent)...")
-# Packed exponents: each byte holds two 4-bit values (0-15)
+# Packed exponents: each byte holds two 4-bit values (0-15). Generate as uint8.
 packed_in_features_rand = M_in // 2
-w_packed_exp_kernel_rand = torch.randint(0, 256, (N_out, packed_in_features_rand), device=DEV, dtype=torch.int8).contiguous()
+w_packed_exp_kernel_rand_uint8 = torch.randint(0, 256, (N_out, packed_in_features_rand), device=DEV, dtype=torch.uint8).contiguous()
 # Random signs: -1, 0, 1 (still need one sign per original weight)
 w_sign_kernel_rand = torch.randint(-1, 2, (N_out, M_in), device=DEV, dtype=torch.int8).contiguous()
 
@@ -98,9 +98,10 @@ tick = time.time()
 for _ in range(COUNT):
     # Ensure output is zeroed or use a fresh tensor if needed
     # output_log_rand.zero_()
+    # Pass the uint8 tensor viewed as int8 to match C++ expectation
     logmatvec_cuda.forward_packed4bit( # Call the new packed function
         a_quant_kernel_rand,
-        w_packed_exp_kernel_rand, # Pass packed exponents
+        w_packed_exp_kernel_rand_uint8.view(torch.int8), # Pass packed exponents (viewed as int8)
         w_sign_kernel_rand,       # Pass signs
         output_log_rand,
         delta_lsb_kernel_dummy,
@@ -133,9 +134,10 @@ print("Weight quantization done for check.")
 # 3. Pack Weights
 print("Packing weights...")
 try:
+    # LogQuantizer.pack returns int8, which is fine here as it represents packed bits
     w_packed_exp_check, w_sign_check_packed = log_quantizer.pack(w_exp_check, w_sign_check)
     # Ensure they are on the correct device and contiguous
-    w_packed_exp_kernel_check = w_packed_exp_check.to(device=DEV).contiguous()
+    w_packed_exp_kernel_check = w_packed_exp_check.to(device=DEV, dtype=torch.int8).contiguous() # Ensure int8 type
     w_sign_kernel_check = w_sign_check_packed.to(device=DEV).contiguous()
     min_exp_check = int(log_quantizer.min_exp.item()) # Get min_exp for kernel
     print("Weight packing done.")
@@ -177,7 +179,8 @@ if can_run_check:
     # 7. Simulate the Kernel Operation with Packing/Unpacking in PyTorch
     print("Simulating exact kernel operation with packing in Python/PyTorch...")
     # --- Simulation Logic ---
-    sim_packed_exp = w_packed_exp_kernel_check.cpu() # Bring to CPU for easier indexing
+    # Use uint8 view for unpacking simulation to correctly handle 0-255 range
+    sim_packed_exp_uint8 = w_packed_exp_kernel_check.cpu().view(torch.uint8)
     sim_signs = w_sign_kernel_check.cpu()
     sim_a_quant = a_quant_kernel_check.cpu()
     sim_output = torch.zeros(N_out, dtype=torch.float64) # Use float64 for accumulator precision
@@ -185,10 +188,11 @@ if can_run_check:
     for r in range(N_out):
         accumulator = 0.0
         for c_packed in range(packed_in_features_rand): # Iterate over packed columns
-            packed_byte = sim_packed_exp[r, c_packed].item() # Get byte as int
-            # Unpack 4-bit mapped exponents
-            mapped_exp1 = (packed_byte >> 4) & 0x0F
-            mapped_exp2 = packed_byte & 0x0F
+            # Read as uint8 item (0-255)
+            packed_byte_uint = sim_packed_exp_uint8[r, c_packed].item()
+            # Unpack 4-bit mapped exponents (works correctly on unsigned byte)
+            mapped_exp1 = (packed_byte_uint >> 4) & 0x0F
+            mapped_exp2 = packed_byte_uint & 0x0F
 
             # Unmap to actual exponents
             exponent1 = mapped_exp1 + min_exp_check
