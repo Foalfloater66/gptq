@@ -106,10 +106,12 @@ class LogMatVecPackedLinear(nn.Module):
             # Write kernel output to the temporary float32 buffer slice
             output_single_float32 = output_float32[i]
 
-            logmatvec_cuda.forward_packed4bit(
-                a_quant_single,
-                self.packed_exponents, # Weight tensors are reused
-                self.signs,
+            # Explicitly set device context before kernel launch
+            with torch.cuda.device(self.packed_exponents.device):
+                logmatvec_cuda.forward_packed4bit(
+                    a_quant_single,
+                    self.packed_exponents, # Weight tensors are reused
+                    self.signs,
                 output_single_float32, # Write to float32 buffer slice
                 delta_lsb_single,
                 self.min_exp.item()
