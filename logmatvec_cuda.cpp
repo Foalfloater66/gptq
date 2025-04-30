@@ -113,6 +113,7 @@ torch::Tensor logmatvec_forward_packed4bit(
     return output;
 }
 
+#if 0 // Removed stray code block causing errors
 // Boilerplate for Python binding using Pybind11 - Updated function name
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def(
@@ -127,6 +128,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 
     return output;
 }
+#endif
 
 
 // C++ wrapper function callable from Python - Packed 4-bit with Float Multiplication
@@ -205,7 +207,7 @@ torch::Tensor logmatvec_forward_packed4bit_floatmul( // New function name
 }
 
 
-// Boilerplate for Python binding using Pybind11 - Updated function name
+// Boilerplate for Python binding using Pybind11 - Consolidated
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def(
         "forward_packed4bit", // Original bit shift version
@@ -217,4 +219,5 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         &logmatvec_forward_packed4bit_floatmul,
         "LogNet Style Matrix-Vector Forward Pass with Packed 4-bit Exponents (Float Mul) (CUDA)" // Docstring
     );
+    // Removed duplicate PYBIND11_MODULE block start
 }
