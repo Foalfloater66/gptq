@@ -47,23 +47,22 @@ __device__ inline void accumulate_bitshift(const int x, const int y, const signe
 }
 
 
-// Helper function to unpack two 4-bit values from an int8 byte
-__device__ inline void unpack_4bit(const int8_t packed_byte, uint8_t& val1, uint8_t& val2) {
+// Helper function to unpack two 4-bit codes (sign+exponent) from an int8 byte
+__device__ inline void unpack_4bit_codes(const int8_t packed_byte, uint8_t& code1, uint8_t& code2) {
     // Cast to unsigned char to avoid sign extension issues with right shift
     uint8_t unsigned_byte = static_cast<uint8_t>(packed_byte);
-    val1 = (unsigned_byte >> 4) & 0x0F; // High nibble
-    val2 = unsigned_byte & 0x0F;        // Low nibble
+    code1 = (unsigned_byte >> 4) & 0x0F; // High nibble (first weight code)
+    code2 = unsigned_byte & 0x0F;        // Low nibble (second weight code)
 }
 
 // Kernel for Log-Quantized Matrix (W) x Linear-Quantized Vector (a)
-// Uses packed 4-bit exponents and separate 8-bit signs
+// Uses bundled packed 4-bit codes (1 sign + 3 exponent)
 __global__ void LogMatVecKernelPacked4bit(
     const int* __restrict__ a_quant,          // Quantized activations [InFeatures]
-    const int8_t* __restrict__ w_packed_exp,  // Packed 4-bit mapped exponents [OutFeatures * InFeatures/2]
-    const signed char* __restrict__ w_sign,   // Weight signs [OutFeatures * InFeatures]
+    const int8_t* __restrict__ w_packed_4bit, // Packed 4-bit codes [OutFeatures * InFeatures/2]
     float* __restrict__ output,               // Output vector [OutFeatures]
     const float delta_lsb,                   // Activation scaling factor
-    const int min_exp,                       // Minimum exponent value for unmapping
+    const int min_exp,                       // Minimum exponent value for unmapping (maps to exp_map=0)
     const int in_features,
     const int out_features
 ) {
@@ -86,30 +85,49 @@ __global__ void LogMatVecKernelPacked4bit(
         // Calculate base index for signs and activations (corresponding to first weight in pair)
         int base_idx = packed_idx * 2;
 
-        // Read packed byte and unpack mapped exponents
-        int8_t packed_byte = w_packed_exp[packed_weight_idx];
-        uint8_t mapped_exp1, mapped_exp2;
-        unpack_4bit(packed_byte, mapped_exp1, mapped_exp2);
+        // Calculate index for packed weight matrix (row-major)
+        int packed_weight_idx = output_row * packed_in_features + packed_idx;
+        // Calculate base index for activations (corresponding to first weight in pair)
+        int base_idx = packed_idx * 2;
 
-        // Read corresponding signs
-        signed char sign1 = w_sign[output_row * in_features + base_idx];
-        signed char sign2 = w_sign[output_row * in_features + base_idx + 1];
+        // Read packed byte and unpack 4-bit codes
+        int8_t packed_byte = w_packed_4bit[packed_weight_idx];
+        uint8_t code1, code2;
+        unpack_4bit_codes(packed_byte, code1, code2);
 
         // Read corresponding activations
         int activation1 = a_quant[base_idx];
         int activation2 = a_quant[base_idx + 1];
 
-        // --- Process first weight in pair ---
-        if (sign1 != 0) {
-            // Unmap the 4-bit value back to the actual exponent
-            int exponent1 = static_cast<int>(mapped_exp1) + min_exp;
+        // --- Process first weight (code1) ---
+        if (code1 != 0) { // Check for special zero code
+            // Decode sign and exponent map
+            signed char sign1 = (code1 & 0x08) ? -1 : 1; // MSB (bit 3) is sign (1=neg, 0=pos)
+            uint8_t exp_map1 = code1 & 0x07; // 3 LSBs are exponent map
+            // Unmap exponent (handle the offset for positive values)
+            // Positive codes 1-7 map to exp_map 0-6 -> exponents min_exp to max_exp-1
+            // Negative codes 8-15 map to exp_map 0-7 -> exponents min_exp to max_exp
+            int exponent1;
+            if (sign1 > 0) { // Positive (codes 1-7 map to exp_map 0-6)
+                 exponent1 = static_cast<int>(exp_map1 - 1) + min_exp; // Map 1->min_exp, 7->max_exp-1
+            } else { // Negative (codes 8-15 map to exp_map 0-7)
+                 exponent1 = static_cast<int>(exp_map1) + min_exp; // Map 0->min_exp, 7->max_exp
+            }
             accumulate_bitshift(activation1, exponent1, sign1, &accumulator);
         }
 
-        // --- Process second weight in pair ---
-        if (sign2 != 0) {
-            // Unmap the 4-bit value back to the actual exponent
-            int exponent2 = static_cast<int>(mapped_exp2) + min_exp;
+        // --- Process second weight (code2) ---
+        if (code2 != 0) { // Check for special zero code
+            // Decode sign and exponent map
+            signed char sign2 = (code2 & 0x08) ? -1 : 1;
+            uint8_t exp_map2 = code2 & 0x07;
+            // Unmap exponent
+            int exponent2;
+             if (sign2 > 0) {
+                 exponent2 = static_cast<int>(exp_map2 - 1) + min_exp;
+            } else {
+                 exponent2 = static_cast<int>(exp_map2) + min_exp;
+            }
             accumulate_bitshift(activation2, exponent2, sign2, &accumulator);
         }
     }
@@ -142,11 +160,10 @@ __global__ void LogMatVecKernelPacked4bit(
 // It sets up the <<<...>>> kernel launch syntax.
 void LogMatVecKernelLauncher(
     const int* a_quant,
-    const int8_t* w_packed_exp, // Corrected type to match declaration and usage
-    const signed char* w_sign,
+    const int8_t* w_packed_4bit, // Changed parameter name
     float* output,
     const float delta_lsb,
-    const int min_exp,          // Add min_exp in the correct position
+    const int min_exp,
     const int in_features,
     const int out_features,
     const dim3 blocks,
@@ -155,36 +172,19 @@ void LogMatVecKernelLauncher(
     // const int min_exp, // Remove from the end
     cudaStream_t stream)
 {
-    // Launch the __global__ kernel for packed 4-bit
+    // Launch the __global__ kernel for packed 4-bit codes
     LogMatVecKernelPacked4bit<<<blocks, threads, shared_mem_size, stream>>>(
         a_quant,
-        w_packed_exp, // Pass packed exponents
-        w_sign,       // Pass signs
+        w_packed_4bit, // Pass packed codes
         output,
         delta_lsb,
-        min_exp,      // Pass min_exp for unmapping
+        min_exp,       // Pass min_exp for unmapping
         in_features,
         out_features
     );
 }
 
 
-// ============================================================================
-// Kernel Version using Floating-Point Multiplication instead of Bit Shifts
-// ============================================================================
-
-// Kernel for Log-Quantized Matrix (W) x Linear-Quantized Vector (a)
-// Uses packed 4-bit exponents, separate 8-bit signs, BUT performs float multiplication
-__global__ void LogMatVecKernelPacked4bit_FloatMul(
-    const int* __restrict__ a_quant,          // Quantized activations [InFeatures]
-    const int8_t* __restrict__ w_packed_exp,  // Packed 4-bit mapped exponents [OutFeatures * InFeatures/2]
-    const signed char* __restrict__ w_sign,   // Weight signs [OutFeatures * InFeatures]
-    float* __restrict__ output,               // Output vector [OutFeatures]
-    const float delta_lsb,                   // Activation scaling factor
-    const int min_exp,                       // Minimum exponent value for unmapping
-    const int in_features,
-    const int out_features
-) {
     // Each block computes one output feature
     const int output_row = blockIdx.x;
 
@@ -251,9 +251,7 @@ __global__ void LogMatVecKernelPacked4bit_FloatMul(
     }
 }
 
-
-// --- Kernel Launcher for Float Multiplication Version ---
-void LogMatVecKernelLauncher_FloatMul( // New launcher name
+// Removed Float Multiplication Launcher
     const int* a_quant,
     const int8_t* w_packed_exp,
     const signed char* w_sign,

@@ -5,7 +5,124 @@ import torch.nn as nn
 
 from gptq import *
 from modelutils import *
-from quant import get_quantizer
+# Import necessary quantizers and the custom kernel
+from quant import get_quantizer, LogQuantizer
+import logmatvec_cuda # Import the compiled custom kernel
+import copy # For deepcopying model if needed
+
+
+# --- Custom Layer Definition (Bundled 1+3 bit) ---
+
+class LogMatVecPackedLinear(nn.Module):
+    # Needs ACT_BITS defined globally or passed in
+    # Let's define it here for now, assuming 8-bit activations
+    ACT_BITS = 8
+
+    def __init__(self, in_features, out_features):
+        super().__init__()
+        if in_features % 2 != 0:
+             raise ValueError("Input features must be even for 4-bit packing.")
+        self.in_features = in_features
+        self.out_features = out_features
+
+        # Buffers to store packed weights and parameters (initialized empty)
+        # Packed weights (int8, shape: out_features x in_features/2) - Stores bundled 4-bit codes
+        self.register_buffer('packed_weights', torch.empty((out_features, in_features // 2), dtype=torch.int8))
+        # Bias (float32, shape: out_features)
+        self.register_buffer('bias', torch.empty(out_features, dtype=torch.float32))
+        # Quantization parameters (scalar)
+        self.register_buffer('min_exp', torch.tensor(0, dtype=torch.int32)) # Still needed for unmapping
+        # Activation quantization scale (calibrated)
+        self.register_buffer('activation_scale', torch.tensor(1.0, dtype=torch.float32))
+
+    def configure_quantization(
+        self,
+        linear_layer: nn.Linear,
+        quantizer: LogQuantizer,
+        activation_scale: torch.Tensor
+    ):
+        """Quantizes weights from linear_layer, packs them, stores activation scale."""
+        if linear_layer.in_features != self.in_features or linear_layer.out_features != self.out_features:
+            raise ValueError("Layer dimensions mismatch")
+
+        weight = linear_layer.weight.data # Assume already on correct device
+        bias_data = linear_layer.bias.data if linear_layer.bias is not None else torch.zeros(self.out_features, device=weight.device)
+
+        # Ensure quantizer is ready (find_params should ideally be called once globally or per layer type)
+        quantizer.find_params(weight, weight=True)
+        if not quantizer.ready():
+             raise RuntimeError("Quantizer failed to find parameters.")
+
+        # Quantize to get 4-bit nibbles
+        packed_nibbles = quantizer.quantize(weight)
+
+        # Pack nibbles into bytes
+        packed_bytes = quantizer.pack(packed_nibbles)
+
+        # Store packed data and parameters
+        self.packed_weights.copy_(packed_bytes) # Store packed 4-bit codes
+        self.bias.copy_(bias_data)
+        self.min_exp.copy_(torch.tensor(int(quantizer.min_exp.item()), dtype=torch.int32))
+        self.activation_scale.copy_(activation_scale.clamp(min=1e-9)) # Store calibrated scale
+
+        # print(f"  Layer {self.out_features}x{self.in_features} configured.") # Optional print
+
+
+    def forward(self, x):
+        # x shape: (batch_size, sequence_length, in_features) or (..., in_features)
+        original_shape = x.shape
+        # Reshape input to (batch*seq, in_features) if needed
+        if x.ndim > 2:
+            x = x.reshape(-1, x.shape[-1])
+
+        # --- Activation Quantization (Calibrated) ---
+        q_max_act = 2**(self.ACT_BITS - 1) - 1
+        q_min_act = -2**(self.ACT_BITS - 1)
+        # Use the pre-calculated scale stored in the buffer
+        delta_lsb = self.activation_scale
+        # Quantize and clamp activations
+        a_quant = torch.round(x / delta_lsb).clamp(q_min_act, q_max_act).to(torch.int32)
+        # --- End Activation Quantization ---
+
+        # Prepare output tensor - Match the expected model dtype (likely half)
+        output_shape = (*x.shape[:-1], self.out_features)
+        output_dtype = x.dtype # Assume output should match input dtype
+        output = torch.empty(output_shape, dtype=output_dtype, device=x.device)
+
+        # Kernel outputs float32, so we need a temporary float32 buffer
+        output_float32 = torch.empty(output_shape, dtype=torch.float32, device=x.device)
+
+        # Iterate over batch dimension (kernel expects 1D activation vector)
+        # TODO: Optimize this loop - ideally use a batch-aware kernel
+        for i in range(x.shape[0]):
+            a_quant_single = a_quant[i].contiguous()
+            # Use the single scalar scale for the whole layer
+            delta_lsb_single = delta_lsb.item()
+            # Write kernel output to the temporary float32 buffer slice
+            output_single_float32 = output_float32[i]
+
+            # Explicitly set device context before kernel launch
+            with torch.cuda.device(self.packed_weights.device): # Use packed_weights device
+                logmatvec_cuda.forward_packed4bit( # Call updated kernel signature
+                    a_quant_single,
+                    self.packed_weights, # Pass packed 4-bit codes
+                    output_single_float32, # Write to float32 buffer slice
+                    delta_lsb_single,
+                    self.min_exp.item()
+                )
+
+        # Add bias (ensure bias is correct dtype before adding)
+        # Cast kernel output back to target dtype before adding bias
+        output = output_float32.to(output_dtype)
+        output += self.bias.to(output_dtype) # Ensure bias matches output dtype
+
+        # Reshape output to original shape (if needed)
+        if len(original_shape) > 2:
+            output = output.reshape(*original_shape[:-1], self.out_features)
+
+        return output
+
+# --- End Custom Layer Definition ---
 
 
 def get_opt(model):
@@ -20,9 +137,14 @@ def get_opt(model):
     model.seqlen = model.config.max_position_embeddings
     return model
 
+# --- LogPack4bit Sequential Logic (Replaces original opt_sequential) ---
 @torch.no_grad()
-def opt_sequential(model, dataloader, quantizer_name, dev):
-    print('Starting ...')
+def opt_sequential(model, dataloader, quantizer_name, dev): # quantizer_name is less relevant here, but kept for signature
+    print('Starting LogPack4bit quantization...')
+
+    # Ensure global args is accessible or pass it in if needed
+    # Assuming args is accessible globally as defined in if __name__ == '__main__'
+    global args # Need to declare global to access args defined in main block
 
     use_cache = model.config.use_cache
     model.config.use_cache = False
@@ -126,7 +248,156 @@ def opt_sequential(model, dataloader, quantizer_name, dev):
 
     model.config.use_cache = use_cache
     
-    return quantizers
+    model.config.use_cache = False
+    layers = model.model.decoder.layers # Get layers
+
+    # --- Activation Calibration Setup ---
+    print("Collecting activation statistics...")
+    act_scales = {}
+    act_dict = {} # To store intermediate activations
+
+    def stat_input_hook(m, x, y, name):
+        # Find layer name corresponding to module m
+        if isinstance(x, tuple):
+            x = x[0]
+        if name not in act_dict:
+             act_dict[name] = []
+        # Store activations on CPU to save GPU memory during calibration
+        act_dict[name].append(x.detach().cpu())
+
+    hooks = []
+    hooked_layer_names = set()
+    for name, m in model.named_modules():
+        if isinstance(m, nn.Linear):
+             if m.in_features % 2 == 0: # Check if layer is compatible
+                  if name not in hooked_layer_names:
+                      hooks.append(
+                           m.register_forward_hook(
+                                lambda mod, inp, outp, n=name: stat_input_hook(mod, inp, outp, n)
+                           )
+                      )
+                      hooked_layer_names.add(name)
+
+    print(f"  Running {args.nsamples} calibration samples...")
+    model.to(dev) # Move model to GPU for calibration run
+    # Ensure embeddings are on the correct device
+    if hasattr(model.model.decoder, 'embed_tokens'): model.model.decoder.embed_tokens = model.model.decoder.embed_tokens.to(dev)
+    if hasattr(model.model.decoder, 'embed_positions'): model.model.decoder.embed_positions = model.model.decoder.embed_positions.to(dev)
+    if hasattr(model.model.decoder, 'project_in') and model.model.decoder.project_in:
+        model.model.decoder.project_in = model.model.decoder.project_in.to(dev)
+
+    # Run calibration samples
+    for i in range(args.nsamples):
+         # Assuming dataloader is a list of batches
+         if i >= len(dataloader):
+             print(f"  Warning: Requested {args.nsamples} samples, but dataloader only has {len(dataloader)}. Stopping calibration early.")
+             break
+         batch = dataloader[i][0].to(dev)
+         try:
+              _ = model(batch)
+         except Exception as e:
+              print(f"Warning: Error during calibration forward pass on sample {i}: {e}")
+              pass # Continue for now
+    for h in hooks:
+         h.remove()
+
+    model.cpu() # Move model back to CPU after calibration
+    torch.cuda.empty_cache()
+
+    # Calculate activation scales
+    q_max_act = 2**(LogMatVecPackedLinear.ACT_BITS - 1) - 1
+    print("  Calculating activation scales...")
+    for name, activations in act_dict.items():
+         if not activations:
+              print(f"  Warning: No activations collected for {name}. Skipping scale calculation.")
+              continue
+         try:
+            act_tensor = torch.cat(activations, dim=0).float()
+         except RuntimeError as e:
+            print(f"  Warning: Could not concatenate activations for {name}. Error: {e}. Skipping.")
+            continue
+         if act_tensor.ndim < 2:
+             print(f"  Warning: Activation tensor for {name} has unexpected shape {act_tensor.shape}. Skipping.")
+             continue
+         # Calculate max absolute value per feature, then take max across features for per-layer scale
+         act_max_abs_per_feat = torch.max(torch.abs(act_tensor.view(-1, act_tensor.shape[-1])), dim=0)[0]
+         layer_max_abs = torch.max(act_max_abs_per_feat)
+         act_scales[name] = (layer_max_abs / q_max_act).clamp(min=1e-9) # Store scale on CPU
+         # print(f"  Activation scale for {name}: {act_scales[name].item():.4f}") # Optional print
+
+    del act_dict
+    print("Activation statistics collected.")
+    # --- End Activation Calibration ---
+
+
+    # --- Log Quantization and Layer Replacement ---
+    print("\nApplying Logarithmic Quantization and Packing...")
+    if quantizer_name != 'logarithm' or args.wbits != 4:
+         print("Warning: LogPack4bit flow selected but quantizer/wbits mismatch. Ensure --quantizer logarithm --wbits 4")
+
+    log_quantizer = LogQuantizer()
+    log_quantizer.configure(bits=args.wbits) # Should be 4
+
+    layers_replaced_count = 0
+    # Iterate through layers again for replacement (ensure layers is correct reference)
+    layers = model.model.decoder.layers
+    for i in range(len(layers)):
+        print(f"Processing layer {i}...")
+        layer = layers[i] # Keep on CPU
+        # Use find_layers to get names relative to the current layer block
+        layer_modules = find_layers(layer)
+
+        for name, lin_layer in layer_modules.items():
+            if not isinstance(lin_layer, nn.Linear): continue
+            if lin_layer.in_features % 2 != 0:
+                print(f"  Skipping {name}: Odd in_features ({lin_layer.in_features}).")
+                continue
+
+            # Construct the full name to look up the scale
+            full_name_found = f"model.decoder.layers.{i}.{name}"
+
+            if full_name_found not in act_scales:
+                 print(f"  Warning: Activation scale not found for {full_name_found}. Skipping replacement.")
+                 continue
+
+            print(f"  Replacing {name} with LogMatVecPackedLinear...")
+            lin_layer.to(dev) # Move original to GPU for quantization
+            custom_layer = LogMatVecPackedLinear(lin_layer.in_features, lin_layer.out_features).to(dev)
+            custom_layer.configure_quantization(
+                lin_layer,
+                log_quantizer,
+                act_scales[full_name_found].to(dev) # Pass scale to GPU
+            )
+            lin_layer.cpu() # Move original back
+            custom_layer.cpu() # Move custom layer to CPU
+
+            # Replace the layer using the relative name 'name'
+            parent_name = name.rsplit('.', 1)[0] if '.' in name else ''
+            sub_layer_name = name.rsplit('.', 1)[-1]
+            if parent_name:
+                 # Need to get the parent module *within the current layer block*
+                 parent_module = layer.get_submodule(parent_name)
+            else:
+                 # This case might happen if find_layers returns top-level modules in the block
+                 # Check if 'name' directly exists in the layer block
+                 if hasattr(layer, sub_layer_name):
+                     parent_module = layer
+                 else:
+                     print(f"  Error: Could not find parent for {name} in layer {i}. Skipping replacement.")
+                     continue
+            setattr(parent_module, sub_layer_name, custom_layer)
+            layers_replaced_count += 1
+
+        # Keep layer[i] on CPU after processing its submodules
+        # layers[i] = layer # Already modified in place
+
+        if i % 5 == 0: torch.cuda.empty_cache()
+
+    print(f"Logarithmic quantization finished. Replaced {layers_replaced_count} layers.")
+    model.config.use_cache = use_cache
+    return {}
+# --- End LogPack4bit Sequential Logic ---
+
 
 @torch.no_grad()
 def opt_eval(model, testenc, dev):

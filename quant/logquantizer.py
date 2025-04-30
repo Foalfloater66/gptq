@@ -20,11 +20,11 @@ class LogQuantizer(QuantizerInterface):
 
     def configure(self, bits, **kwargs):
         """
-        Configure the quantizer. For log quantization with packing,
-        bits determine the number of representable exponent levels.
+        Configure the quantizer. For 1+3 bit log quantization, bits must be 4.
         """
-        if bits <= 1:
-            raise ValueError("LogQuantizer requires bits > 1.")
+        if bits != 4:
+            # Or adapt logic for other bitwidths if needed later
+            raise NotImplementedError("Bundled 1+3 bit LogQuantizer currently only supports bits=4.")
         self.bits = bits
 
 
@@ -60,15 +60,16 @@ class LogQuantizer(QuantizerInterface):
         # The range includes max_exp_val down to min_exp_val
         min_exp_val = max_exp_val - num_positive_levels + 1
 
+        # For 1+3 bit scheme, we have 3 bits for exponent magnitude levels
+        num_exponent_bits = self.bits - 1
+        available_levels = 2**num_exponent_bits # 2^3 = 8 levels
         exponent_range_size = max_exp_val - min_exp_val + 1
 
-        # --- Check if the range fits within the allocated bits ---
-        # Number of levels available for magnitude = 2**(bits - 1)
-        available_levels = 2**(self.bits - 1)
+        # --- Check if the range fits within the allocated exponent bits ---
         if exponent_range_size > available_levels:
             print(
                 f"Warning: LogQuantizer exponent range ({exponent_range_size}) exceeds "
-                f"levels available for {self.bits} bits ({available_levels}). "
+                f"levels available for {num_exponent_bits} exponent bits ({available_levels}). "
                 f"Clamping range."
             )
             # Adjust min_exp to fit the available levels
@@ -124,14 +125,71 @@ class LogQuantizer(QuantizerInterface):
             clamped_log2_full = torch.zeros_like(x) # Or handle appropriately
         # --- End non-zero calculation ---
 
-        # Return the quantized value, the integer exponent, and the sign
-        return q.to(x.dtype), clamped_log2_full.to(torch.int32), sign.to(torch.int8)
+        # --- Bundled 1+3 bit Quantization ---
+        # Calculate sign bit (0 for positive, 1 for negative)
+        sign_bit = (sign < 0).to(torch.uint8) # 1 if negative, 0 otherwise
+
+        # Map clamped exponents to an unsigned integer range [0, 7] for the 3 exponent bits
+        min_exp_val = self.min_exp.item()
+        # Add small epsilon before casting to handle potential floating point inaccuracies near boundaries
+        exponent_map = (clamped_log2_full - min_exp_val + 1e-6).clamp(min=0).to(torch.uint8)
+
+        # Ensure exponent map is within 0-7 range
+        if torch.any(exponent_map > 7):
+             print(f"Warning: Mapped exponents exceed 3-bit range (0-7). Clamping.")
+             exponent_map = torch.clamp(exponent_map, 0, 7)
+
+        # Combine sign bit (MSB) and exponent map (3 LSBs)
+        # packed_nibble = (sign_bit << 3) | exponent_map
+        # Handle the special zero code '0000'
+        # If original sign was 0, output 0000.
+        # Also, if sign is positive (sign_bit=0) and exponent map is 0 (exp_map=0),
+        # this combination (0000) is reserved for zero. We need to map the smallest
+        # positive magnitude (+2^min_exp) to a different code, e.g., 0001.
+        # Let's adjust the exponent map for the smallest positive value:
+        # If sign_bit is 0 and exponent_map is 0, make exponent_map 1 (0001)
+        # This means the effective range for positive exponents is [min_exp+1, max_exp]
+        # Or, more simply, map min_exp to level 1 for positive numbers.
+        # Let's remap: map [min_exp, max_exp] to [0, 7]
+        # Smallest positive magnitude (exponent=min_exp) maps to exp_map=0. Code is 0000.
+        # Use 0000 as the dedicated zero code.
+        # Map smallest positive magnitude (exponent=min_exp) to code 0001.
+        # Map largest positive magnitude (exponent=max_exp) to code 0111. (7 levels)
+        # Map smallest negative magnitude (exponent=min_exp) to code 1000.
+        # Map largest negative magnitude (exponent=max_exp) to code 1111. (8 levels)
+
+        # Recalculate exponent map to fit this new scheme [0..7] -> [1..7] for positive
+        # Map [min_exp, max_exp] to [0, 7]
+        exponent_map = (clamped_log2_full - min_exp_val + 1e-6).clamp(min=0).to(torch.uint8)
+        exponent_map = torch.clamp(exponent_map, 0, 7) # Ensure range 0-7
+
+        # Create the 4-bit code tensor
+        packed_nibbles = torch.zeros_like(x, dtype=torch.uint8)
+
+        # Apply positive codes (0001 to 0111)
+        positive_mask = (sign > 0) & non_zero_mask
+        # Map exponent range [0, 6] to codes [1, 7] for positive values
+        # Smallest positive (exp_map=0) becomes code 1. Largest (exp_map=7) becomes code 7? No, 7 levels.
+        # Let's use 7 levels for positive: map [min_exp, max_exp-1] to [1, 7]
+        # Max positive exponent map value is 6 for codes 1-7
+        positive_exp_map = torch.clamp(exponent_map[positive_mask], 0, 6) # Clamp to 0-6
+        packed_nibbles[positive_mask] = positive_exp_map + 1 # Map to 1-7
+
+        # Apply negative codes (1000 to 1111)
+        negative_mask = (sign < 0) & non_zero_mask
+        # Map exponent range [0, 7] to codes [8, 15] for negative values
+        negative_exp_map = exponent_map[negative_mask] # Use full 0-7 range
+        packed_nibbles[negative_mask] = (1 << 3) | negative_exp_map # Set sign bit (1xxx)
+
+        # Zero values remain 0000
+
+        # Return only the tensor containing the 4-bit codes (stored in uint8)
+        return packed_nibbles
 
 
-    def pack(self, exponents, signs):
+    def pack(self, packed_nibbles):
         """
-        Packs mapped 4-bit exponents into int8 tensors.
-        Assumes exponents are int32 and signs are int8.
+        Packs 4-bit codes (stored in uint8 tensors) into int8 tensors.
         Requires find_params to have been called.
         """
         if not self.ready():
@@ -139,45 +197,21 @@ class LogQuantizer(QuantizerInterface):
         if self.bits != 4:
             raise NotImplementedError("Packing currently only implemented for bits=4.")
 
-        dev = exponents.device
-        if signs.device != dev:
-            raise ValueError("Exponents and signs must be on the same device.")
-
-        # Map exponents to 0-15 range. Level 0 is reserved for true zero?
-        # Let's map min_exp -> 0, max_exp -> N-1 where N = range_size
-        # Map clamped exponents to an unsigned integer range [0, N-1]
-        # N = self._exponent_range.item() # Number of levels
-        min_exp_val = self.min_exp.item()
-        mapped_exponents = (exponents - min_exp_val).to(torch.uint8) # Cast to uint8 after offset
-
-        # Clamp mapped exponents just in case (shouldn't be needed if find_params/quantize are correct)
-        # max_map_val = self._exponent_range.item() - 1
-        # mapped_exponents = torch.clamp(mapped_exponents, 0, max_map_val)
-
-        # Handle true zeros (where sign is 0). We need a specific packed code for zero.
-        # Let's use the mapped exponent value 15 (0xF) to represent zero?
-        # Or should we handle it via the sign tensor? Let's keep sign separate.
-        # The kernel will check the sign first. If sign is 0, exponent doesn't matter.
-
-        # Ensure the mapped exponents fit in 4 bits (0-15)
-        if torch.any(mapped_exponents > 15):
-             print(f"Warning: Mapped exponents exceed 4-bit range (0-15). Clamping.")
-             mapped_exponents = torch.clamp(mapped_exponents, 0, 15)
+        dev = packed_nibbles.device
 
         # Packing: Combine two 4-bit values into one int8
-        # Ensure the input feature dimension is even for simplicity
-        if exponents.shape[-1] % 2 != 0:
-            raise ValueError("Last dimension of exponents must be even for 4-bit packing.")
+        if packed_nibbles.shape[-1] % 2 != 0:
+            raise ValueError("Last dimension must be even for 4-bit packing.")
 
         # Reshape to group elements in pairs
-        # Example: (N_out, M_in) -> (N_out, M_in // 2, 2)
-        reshaped_exponents = mapped_exponents.view(*exponents.shape[:-1], -1, 2)
+        reshaped_nibbles = packed_nibbles.view(*packed_nibbles.shape[:-1], -1, 2)
 
-        # Pack: high_nibble = exp1 << 4, low_nibble = exp2
-        packed_exponents = (reshaped_exponents[..., 0] << 4) | reshaped_exponents[..., 1]
+        # Pack: high_nibble = nibble1 << 4, low_nibble = nibble2
+        # Ensure nibbles are uint8 before shifting
+        packed_bytes = (reshaped_nibbles[..., 0].to(torch.uint8) << 4) | reshaped_nibbles[..., 1].to(torch.uint8)
 
-        # Return packed exponents (int8) and original signs (int8)
-        return packed_exponents.to(torch.int8), signs
+        # Return packed bytes as int8 (bits are preserved)
+        return packed_bytes.to(torch.int8)
 
 
     def ready(self):
