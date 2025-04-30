@@ -88,9 +88,14 @@ class LogMatVecPackedLinear(nn.Module):
         a_quant = torch.round(x / delta_lsb).clamp(q_min_act, q_max_act).to(torch.int32)
         # --- End Activation Quantization ---
 
-        # Prepare output tensor
+        # Prepare output tensor - Match the expected model dtype (likely half)
         output_shape = (*x.shape[:-1], self.out_features)
-        output = torch.empty(output_shape, dtype=torch.float32, device=x.device)
+        # Determine dtype from input or a layer parameter if possible, default to half
+        output_dtype = x.dtype # Assume output should match input dtype
+        output = torch.empty(output_shape, dtype=output_dtype, device=x.device)
+
+        # Kernel outputs float32, so we need a temporary float32 buffer
+        output_float32 = torch.empty(output_shape, dtype=torch.float32, device=x.device)
 
         # Iterate over batch dimension (kernel expects 1D activation vector)
         # TODO: Optimize this loop - ideally use a batch-aware kernel
@@ -98,19 +103,22 @@ class LogMatVecPackedLinear(nn.Module):
             a_quant_single = a_quant[i].contiguous()
             # Use the single scalar scale for the whole layer
             delta_lsb_single = delta_lsb.item()
-            output_single = output[i] # Get view for output
+            # Write kernel output to the temporary float32 buffer slice
+            output_single_float32 = output_float32[i]
 
             logmatvec_cuda.forward_packed4bit(
                 a_quant_single,
                 self.packed_exponents, # Weight tensors are reused
                 self.signs,
-                output_single,         # Write to output slice
+                output_single_float32, # Write to float32 buffer slice
                 delta_lsb_single,
                 self.min_exp.item()
             )
 
-        # Add bias
-        output += self.bias
+        # Add bias (ensure bias is correct dtype before adding)
+        # Cast kernel output back to target dtype before adding bias
+        output = output_float32.to(output_dtype)
+        output += self.bias.to(output_dtype) # Ensure bias matches output dtype
 
         # Reshape output to original shape (if needed)
         if len(original_shape) > 2:
