@@ -26,14 +26,12 @@ class LogMatVecPackedLinear(nn.Module):
         self.out_features = out_features
 
         # Buffers to store packed weights and parameters (initialized empty)
-        # Packed exponents (int8, shape: out_features x in_features/2)
-        self.register_buffer('packed_exponents', torch.empty((out_features, in_features // 2), dtype=torch.int8))
-        # Signs (int8, shape: out_features x in_features)
-        self.register_buffer('signs', torch.empty((out_features, in_features), dtype=torch.int8))
+        # Packed weights (int8, shape: out_features x in_features/2) - Stores bundled 4-bit codes
+        self.register_buffer('packed_weights', torch.empty((out_features, in_features // 2), dtype=torch.int8))
         # Bias (float32, shape: out_features)
         self.register_buffer('bias', torch.empty(out_features, dtype=torch.float32))
         # Quantization parameters (scalar)
-        self.register_buffer('min_exp', torch.tensor(0, dtype=torch.int32))
+        self.register_buffer('min_exp', torch.tensor(0, dtype=torch.int32)) # Still needed for unmapping
         # Activation quantization scale (calibrated)
         self.register_buffer('activation_scale', torch.tensor(1.0, dtype=torch.float32))
 
