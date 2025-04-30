@@ -399,12 +399,74 @@ def opt_sequential(model, dataloader, quantizer_name, dev): # quantizer_name is 
     return {}
 # --- End LogPack4bit Sequential Logic ---
 
+
+# --- Evaluation Function ---
+@torch.no_grad()
+def opt_eval(model, testenc, dev):
+    print('Evaluating ...')
+
+    testenc = testenc.input_ids # Assuming testloader passed is actually testenc from get_loaders
+    nsamples = testenc.numel() // model.seqlen
+
     use_cache = model.config.use_cache
     model.config.use_cache = False
     layers = model.model.decoder.layers
 
+    # Ensure model components are on the evaluation device
     model.model.decoder.embed_tokens = model.model.decoder.embed_tokens.to(dev)
     model.model.decoder.embed_positions = model.model.decoder.embed_positions.to(dev)
+    if hasattr(model.model.decoder, 'project_in') and model.model.decoder.project_in:
+        model.model.decoder.project_in = model.model.decoder.project_in.to(dev)
+    if hasattr(model.model.decoder, 'project_out') and model.model.decoder.project_out:
+        model.model.decoder.project_out = model.model.decoder.project_out.to(dev)
+    if model.model.decoder.final_layer_norm is not None:
+        model.model.decoder.final_layer_norm = model.model.decoder.final_layer_norm.to(dev)
+    model.lm_head = model.lm_head.to(dev)
+    # Move layers to device one by one during evaluation if needed, or all at once if memory allows
+    # For simplicity, move all layers if possible
+    # If multi-gpu was used, this needs adjustment
+    if not hasattr(model, 'gpus'): # If not using multi-gpu setup from benchmark
+        for i in range(len(layers)):
+            layers[i] = layers[i].to(dev)
+
+    # Prepare input buffer (needed if not using the cached 'inps' from sequential)
+    dtype = next(iter(model.parameters())).dtype
+    inps = torch.zeros(
+        (nsamples, model.seqlen, model.config.hidden_size), dtype=dtype, device=dev
+    )
+    # This part seems incorrect for eval - eval usually runs sample by sample
+    # Let's adapt the logic from the original eval section
+
+    nlls = []
+    for i in range(nsamples):
+        batch = testenc[:, (i * model.seqlen):((i + 1) * model.seqlen)].to(dev)
+        # Standard forward pass for evaluation
+        outputs = model(batch)
+        lm_logits = outputs.logits
+        shift_logits = lm_logits[:, :-1, :].contiguous()
+        shift_labels = batch[:, 1:]
+        loss_fct = nn.CrossEntropyLoss()
+        loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
+        neg_log_likelihood = loss.float() * model.seqlen # Use actual sequence length if different
+        nlls.append(neg_log_likelihood)
+
+    ppl = torch.exp(torch.stack(nlls).sum() / (nsamples * model.seqlen))
+    print(f"Perplexity: {ppl.item():.4f}")
+
+    model.config.use_cache = use_cache # Restore use_cache setting
+
+    # Move model back to CPU
+    model.cpu()
+    for i in range(len(layers)):
+        layers[i] = layers[i].cpu()
+    torch.cuda.empty_cache()
+
+    return ppl.item()
+# --- End Evaluation Function ---
+
+
+# TODO: perform packing on GPU
+def opt_pack3(model, quantizers):
     if hasattr(model.model.decoder, 'project_out') and model.model.decoder.project_out:
         model.model.decoder.project_out = model.model.decoder.project_out.to(dev) 
     if hasattr(model.model.decoder, 'project_in') and model.model.decoder.project_in:
