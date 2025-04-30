@@ -117,8 +117,36 @@ if log_kernel_time_rand > 0 and 'fp16_time' in locals() and fp16_time > 0:
      print(f'  Speedup vs FP16: {fp16_time / log_kernel_time_rand:.2f}x')
 
 
+# --- Benchmark LogMatVec Kernel with Random Packed Inputs (Float Mul Version) ---
+print("\nBenchmarking custom kernel with random packed inputs (Float Mul Version)...")
+output_log_rand_fm = torch.zeros(N_out, device=DEV, dtype=torch.float32) # Separate output tensor
+torch.cuda.synchronize()
+tick = time.time()
+for _ in range(COUNT):
+    # output_log_rand_fm.zero_()
+    # Call the float mul version
+    logmatvec_cuda.forward_packed4bit_floatmul(
+        a_quant_kernel_rand,
+        w_packed_exp_kernel_rand_uint8.view(torch.int8), # Pass packed exponents (viewed as int8)
+        w_sign_kernel_rand,       # Pass signs
+        output_log_rand_fm,       # Pass output tensor
+        delta_lsb_kernel_dummy,
+        min_exp_dummy
+    )
+    torch.cuda.synchronize()
+log_kernel_time_rand_fm = (time.time() - tick) / COUNT
+print(f'LogMatVec Kernel (FloatMul Packed Random {LOG_BITS}bW/{ACT_BITS}bA Equiv): {log_kernel_time_rand_fm:.6f} s')
+
+if log_kernel_time_rand_fm > 0 and fp32_time > 0:
+     print(f'  Speedup vs FP32: {fp32_time / log_kernel_time_rand_fm:.2f}x')
+if log_kernel_time_rand_fm > 0 and 'fp16_time' in locals() and fp16_time > 0:
+     print(f'  Speedup vs FP16: {fp16_time / log_kernel_time_rand_fm:.2f}x')
+if log_kernel_time_rand_fm > 0 and log_kernel_time_rand > 0:
+     print(f'  Speedup (BitShift vs FloatMul): {log_kernel_time_rand_fm / log_kernel_time_rand:.2f}x')
+
+
 # --- Correctness Check (Using Actual Quantized and Packed Data) ---
-print('\n--- Correctness Check (Simulated vs Kernel on Quantized Packed Data) ---')
+print('\n--- Correctness Check (Simulated vs Kernels on Quantized Packed Data) ---') # Updated title
 # Use the original FP32 matrix and vector for this section
 # 1. Initialize LogQuantizer
 log_quantizer = LogQuantizer()
@@ -176,9 +204,23 @@ if can_run_check:
     )
     torch.cuda.synchronize()
 
+    # Also run the FloatMul kernel once for comparison
+    output_log_check_fm = torch.zeros(N_out, device=DEV, dtype=torch.float32)
+    print("Running float mul kernel once with quantized packed data...")
+    logmatvec_cuda.forward_packed4bit_floatmul(
+        a_quant_kernel_check,
+        w_packed_exp_kernel_check,
+        w_sign_kernel_check,
+        output_log_check_fm,
+        delta_lsb_kernel_check,
+        min_exp_check
+    )
+    torch.cuda.synchronize()
+
+
     # 7. Simulate the Kernel Operation with Packing/Unpacking in PyTorch
-    print("Simulating exact kernel operation with packing in Python/PyTorch...")
-    # --- Vectorized Simulation Logic ---
+    print("Simulating exact kernel operation (bit shift logic) in Python/PyTorch...")
+    # --- Vectorized Simulation Logic (Bit Shift) ---
     # Perform simulation on CPU to avoid GPU OOM during check, use float64 for precision
     sim_packed_exp_uint8 = w_packed_exp_kernel_check.cpu().view(torch.uint8)
     sim_signs = w_sign_kernel_check.cpu().float() # Use float for calculations
@@ -224,24 +266,44 @@ if can_run_check:
 
     simulated_output_check = simulated_output_check.to(device=DEV) # Move final result to GPU
 
-    # 8. Compare Kernel Output with Simulation and FP32
-    print("Comparing outputs...")
-    abs_diff_sim = torch.abs(output_log_check - simulated_output_check)
-    mean_abs_err_sim = torch.mean(abs_diff_sim).item()
-    max_abs_err_sim = torch.max(abs_diff_sim).item()
-    rel_err_sim = torch.mean(abs_diff_sim / (torch.abs(simulated_output_check) + 1e-9)).item() # Avoid div by zero
-    print(f"Mean Absolute Error (Kernel vs Simulated): {mean_abs_err_sim:.6f}")
-    print(f"Max Absolute Error (Kernel vs Simulated): {max_abs_err_sim:.6f}")
-    print(f"Mean Relative Error (Kernel vs Simulated): {rel_err_sim:.6f}")
+    # 8. Compare Kernel Outputs with Simulation and FP32
+    print("\nComparing outputs...")
+    print("--- Bit Shift Kernel ---")
+    abs_diff_sim_bs = torch.abs(output_log_check - simulated_output_check)
+    mean_abs_err_sim_bs = torch.mean(abs_diff_sim_bs).item()
+    max_abs_err_sim_bs = torch.max(abs_diff_sim_bs).item()
+    rel_err_sim_bs = torch.mean(abs_diff_sim_bs / (torch.abs(simulated_output_check) + 1e-9)).item()
+    print(f"Mean Absolute Error (BitShift Kernel vs Simulated): {mean_abs_err_sim_bs:.6f}")
+    print(f"Max Absolute Error (BitShift Kernel vs Simulated): {max_abs_err_sim_bs:.6f}")
+    print(f"Mean Relative Error (BitShift Kernel vs Simulated): {rel_err_sim_bs:.6f}")
 
-    # Compare kernel output with original FP32 output (mul_fp32 is N_out x 1)
-    abs_diff_fp32 = torch.abs(output_log_check - mul_fp32.squeeze()) # Squeeze FP32 output
-    mean_abs_err_fp32 = torch.mean(abs_diff_fp32).item()
-    max_abs_err_fp32 = torch.max(abs_diff_fp32).item()
-    rel_err_fp32 = torch.mean(abs_diff_fp32 / (torch.abs(mul_fp32.squeeze()) + 1e-9)).item()
-    print(f"Mean Absolute Error (Kernel vs FP32): {mean_abs_err_fp32:.6f}")
-    print(f"Max Absolute Error (Kernel vs FP32): {max_abs_err_fp32:.6f}")
-    print(f"Mean Relative Error (Kernel vs FP32): {rel_err_fp32:.6f}")
+    abs_diff_fp32_bs = torch.abs(output_log_check - mul_fp32.squeeze()) # Squeeze FP32 output
+    mean_abs_err_fp32_bs = torch.mean(abs_diff_fp32_bs).item()
+    max_abs_err_fp32_bs = torch.max(abs_diff_fp32_bs).item()
+    rel_err_fp32_bs = torch.mean(abs_diff_fp32_bs / (torch.abs(mul_fp32.squeeze()) + 1e-9)).item()
+    print(f"Mean Absolute Error (BitShift Kernel vs FP32): {mean_abs_err_fp32_bs:.6f}")
+    print(f"Max Absolute Error (BitShift Kernel vs FP32): {max_abs_err_fp32_bs:.6f}")
+    print(f"Mean Relative Error (BitShift Kernel vs FP32): {rel_err_fp32_bs:.6f}")
+
+    print("\n--- Float Mul Kernel ---")
+    # Compare FloatMul kernel to the same simulation (which represents the bit shift logic)
+    # This comparison isn't strictly "correctness" but shows difference between kernel types
+    abs_diff_sim_fm = torch.abs(output_log_check_fm - simulated_output_check)
+    mean_abs_err_sim_fm = torch.mean(abs_diff_sim_fm).item()
+    max_abs_err_sim_fm = torch.max(abs_diff_sim_fm).item()
+    rel_err_sim_fm = torch.mean(abs_diff_sim_fm / (torch.abs(simulated_output_check) + 1e-9)).item()
+    print(f"Mean Absolute Error (FloatMul Kernel vs Simulated): {mean_abs_err_sim_fm:.6f}")
+    print(f"Max Absolute Error (FloatMul Kernel vs Simulated): {max_abs_err_sim_fm:.6f}")
+    print(f"Mean Relative Error (FloatMul Kernel vs Simulated): {rel_err_sim_fm:.6f}")
+
+    # Compare FloatMul kernel output with original FP32 output
+    abs_diff_fp32_fm = torch.abs(output_log_check_fm - mul_fp32.squeeze())
+    mean_abs_err_fp32_fm = torch.mean(abs_diff_fp32_fm).item()
+    max_abs_err_fp32_fm = torch.max(abs_diff_fp32_fm).item()
+    rel_err_fp32_fm = torch.mean(abs_diff_fp32_fm / (torch.abs(mul_fp32.squeeze()) + 1e-9)).item()
+    print(f"Mean Absolute Error (FloatMul Kernel vs FP32): {mean_abs_err_fp32_fm:.6f}")
+    print(f"Max Absolute Error (FloatMul Kernel vs FP32): {max_abs_err_fp32_fm:.6f}")
+    print(f"Mean Relative Error (FloatMul Kernel vs FP32): {rel_err_fp32_fm:.6f}")
 
 
 print("\nBenchmarking finished.")
