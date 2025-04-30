@@ -402,8 +402,22 @@ def opt_sequential(model, dataloader, quantizer_name, dev): # quantizer_name is 
 
 # --- Evaluation Function ---
 @torch.no_grad()
-def opt_eval(model, testenc, dev):
+def opt_eval(model, testenc, dev): # 'dev' parameter is less relevant if model is multi-gpu
     print('Evaluating ...')
+
+    # Check if model is distributed, otherwise use the single 'dev'
+    if hasattr(model, 'gpus') and len(model.gpus) > 1:
+        print(f"  Evaluating on multi-GPU setup: {model.gpus}")
+        input_device = model.gpus[0]
+        output_device = model.gpus[-1]
+    else:
+        # Fallback to single device if not distributed
+        print(f"  Evaluating on single device: {dev}")
+        input_device = dev
+        output_device = dev
+        # Ensure model is on the single device if not already distributed
+        model.to(input_device)
+
 
     testenc = testenc.input_ids # Assuming testloader passed is actually testenc from get_loaders
     nsamples = testenc.numel() // model.seqlen
@@ -421,44 +435,45 @@ def opt_eval(model, testenc, dev):
         model.model.decoder.project_out = model.model.decoder.project_out.to(dev)
     if model.model.decoder.final_layer_norm is not None:
         model.model.decoder.final_layer_norm = model.model.decoder.final_layer_norm.to(dev)
-    model.lm_head = model.lm_head.to(dev)
-    # Move layers to device one by one during evaluation if needed, or all at once if memory allows
-    # For simplicity, move all layers if possible
-    # If multi-gpu was used, this needs adjustment
-    if not hasattr(model, 'gpus'): # If not using multi-gpu setup from benchmark
-        for i in range(len(layers)):
-            layers[i] = layers[i].to(dev)
+    model.lm_head = model.lm_head.to(output_device) # Ensure lm_head is on output device
 
-    # Prepare input buffer (needed if not using the cached 'inps' from sequential)
-    dtype = next(iter(model.parameters())).dtype
-    inps = torch.zeros(
-        (nsamples, model.seqlen, model.config.hidden_size), dtype=dtype, device=dev
-    )
-    # This part seems incorrect for eval - eval usually runs sample by sample
-    # Let's adapt the logic from the original eval section
+    # Ensure necessary components are on the correct devices if multi-GPU
+    # Embeddings should be on input_device, final_ln/lm_head on output_device
+    # This should already be handled by opt_multigpu if it was called.
+    # If evaluating a model *not* processed by opt_multigpu, model.to(dev) handles it.
+
+    # No need to prepare the large 'inps' buffer for evaluation
 
     nlls = []
+    loss_fct = nn.CrossEntropyLoss()
     for i in range(nsamples):
-        batch = testenc[:, (i * model.seqlen):((i + 1) * model.seqlen)].to(dev)
-        # Standard forward pass for evaluation
+        # Move batch to the input device
+        batch = testenc[:, (i * model.seqlen):((i + 1) * model.seqlen)].to(input_device)
+        # Standard forward pass for evaluation - MoveModule handles intermediate transfers
         outputs = model(batch)
-        lm_logits = outputs.logits
+        lm_logits = outputs.logits # Logits will be on output_device
+
+        # Shift logits and labels for next token prediction loss
         shift_logits = lm_logits[:, :-1, :].contiguous()
-        shift_labels = batch[:, 1:]
-        loss_fct = nn.CrossEntropyLoss()
+        # Move labels to the output device for loss calculation
+        shift_labels = batch[:, 1:].to(output_device)
+
+        # Calculate loss on the output device
         loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
         neg_log_likelihood = loss.float() * model.seqlen # Use actual sequence length if different
         nlls.append(neg_log_likelihood)
+        # Optional: Clear cache between samples if memory is very tight
+        # torch.cuda.empty_cache()
 
+    # Stack NLLs (likely on output_device) and calculate PPL
     ppl = torch.exp(torch.stack(nlls).sum() / (nsamples * model.seqlen))
     print(f"Perplexity: {ppl.item():.4f}")
 
     model.config.use_cache = use_cache # Restore use_cache setting
 
-    # Move model back to CPU
+    # Move model back to CPU (this should consolidate it)
     model.cpu()
-    for i in range(len(layers)):
-        layers[i] = layers[i].cpu()
+    # Explicitly clear GPU memory after moving model to CPU
     torch.cuda.empty_cache()
 
     return ppl.item()
