@@ -104,15 +104,14 @@ class LogMatVecPackedLinear(nn.Module):
             output_single_float32 = output_float32[i]
 
             # Explicitly set device context before kernel launch
-            with torch.cuda.device(self.packed_exponents.device):
-                logmatvec_cuda.forward_packed4bit(
+            with torch.cuda.device(self.packed_weights.device): # Use packed_weights device
+                logmatvec_cuda.forward_packed4bit( # Call updated kernel signature
                     a_quant_single,
-                    self.packed_exponents, # Weight tensors are reused
-                    self.signs,
-                output_single_float32, # Write to float32 buffer slice
-                delta_lsb_single,
-                self.min_exp.item()
-            )
+                    self.packed_weights, # Pass packed 4-bit codes
+                    output_single_float32, # Write to float32 buffer slice
+                    delta_lsb_single,
+                    self.min_exp.item()
+                )
 
         # Add bias (ensure bias is correct dtype before adding)
         # Cast kernel output back to target dtype before adding bias
