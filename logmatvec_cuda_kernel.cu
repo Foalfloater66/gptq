@@ -146,12 +146,13 @@ void LogMatVecKernelLauncher(
     const signed char* w_sign,
     float* output,
     const float delta_lsb,
+    const int min_exp,          // Add min_exp in the correct position
     const int in_features,
     const int out_features,
     const dim3 blocks,
     const dim3 threads,
     const size_t shared_mem_size,
-    const int min_exp, // Added min_exp
+    // const int min_exp, // Remove from the end
     cudaStream_t stream)
 {
     // Launch the __global__ kernel for packed 4-bit
