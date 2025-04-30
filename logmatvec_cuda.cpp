@@ -5,12 +5,14 @@
 #include <c10/cuda/CUDAStream.h> // Include for getCurrentCUDAStream
 
 // Forward declaration of the CUDA kernel launcher function (defined in .cu file)
+// Updated for packed 4-bit exponents
 void LogMatVecKernelLauncher(
     const int* a_quant,
-    const int* w_exp,
-    const signed char* w_sign, // Use signed char explicitly
+    const int8_t* w_packed_exp, // Changed from w_exp (int*)
+    const signed char* w_sign,
     float* output,
     const float delta_lsb,
+    const int min_exp,          // Added min_exp
     const int in_features,
     const int out_features,
     const dim3 blocks,
@@ -19,40 +21,44 @@ void LogMatVecKernelLauncher(
     cudaStream_t stream);
 
 
-// C++ wrapper function callable from Python
-torch::Tensor logmatvec_forward(
-    torch::Tensor a_quant,      // Quantized activations (Int32)
-    torch::Tensor w_exp,        // Weight exponents (Int32)
-    torch::Tensor w_sign,       // Weight signs (Int8/Char)
-    torch::Tensor output,       // Pre-allocated output tensor (Float32)
-    double delta_lsb            // Activation scaling factor (double for precision from Python)
+// C++ wrapper function callable from Python - Updated for packed weights
+torch::Tensor logmatvec_forward_packed4bit(
+    torch::Tensor a_quant,          // Quantized activations (Int32)
+    torch::Tensor w_packed_exp,     // Packed 4-bit mapped exponents (Int8)
+    torch::Tensor w_sign,           // Weight signs (Int8)
+    torch::Tensor output,           // Pre-allocated output tensor (Float32)
+    double delta_lsb,               // Activation scaling factor
+    int min_exp                     // Minimum exponent for unmapping
 ) {
     // Input validation
     TORCH_CHECK(a_quant.device().is_cuda(), "a_quant must be a CUDA tensor");
-    TORCH_CHECK(w_exp.device().is_cuda(), "w_exp must be a CUDA tensor");
+    TORCH_CHECK(w_packed_exp.device().is_cuda(), "w_packed_exp must be a CUDA tensor"); // Check packed tensor
     TORCH_CHECK(w_sign.device().is_cuda(), "w_sign must be a CUDA tensor");
     TORCH_CHECK(output.device().is_cuda(), "output must be a CUDA tensor");
 
     TORCH_CHECK(a_quant.is_contiguous(), "a_quant must be contiguous");
-    TORCH_CHECK(w_exp.is_contiguous(), "w_exp must be contiguous");
+    TORCH_CHECK(w_packed_exp.is_contiguous(), "w_packed_exp must be contiguous"); // Check packed tensor
     TORCH_CHECK(w_sign.is_contiguous(), "w_sign must be contiguous");
     TORCH_CHECK(output.is_contiguous(), "output must be contiguous");
 
     TORCH_CHECK(a_quant.dtype() == torch::kInt32, "a_quant must be Int32");
-    TORCH_CHECK(w_exp.dtype() == torch::kInt32, "w_exp must be Int32");
-    TORCH_CHECK(w_sign.dtype() == torch::kInt8, "w_sign must be Int8"); // Check for kInt8
+    TORCH_CHECK(w_packed_exp.dtype() == torch::kInt8, "w_packed_exp must be Int8"); // Check packed tensor type
+    TORCH_CHECK(w_sign.dtype() == torch::kInt8, "w_sign must be Int8");
     TORCH_CHECK(output.dtype() == torch::kFloat32, "output must be Float32");
 
-    TORCH_CHECK(w_exp.dim() == 2, "w_exp must be 2D");
+    TORCH_CHECK(w_packed_exp.dim() == 2, "w_packed_exp must be 2D"); // Packed tensor shape
     TORCH_CHECK(w_sign.dim() == 2, "w_sign must be 2D");
     TORCH_CHECK(a_quant.dim() == 1, "a_quant must be 1D");
     TORCH_CHECK(output.dim() == 1, "output must be 1D");
 
-    const int out_features = w_exp.size(0);
-    const int in_features = w_exp.size(1);
+    const int out_features = w_sign.size(0); // Get dimensions from sign tensor
+    const int in_features = w_sign.size(1);
+    const int packed_in_features = w_packed_exp.size(1);
 
-    TORCH_CHECK(w_sign.size(0) == out_features, "w_sign dim 0 mismatch");
-    TORCH_CHECK(w_sign.size(1) == in_features, "w_sign dim 1 mismatch");
+    // Dimension checks
+    TORCH_CHECK(in_features % 2 == 0, "Input features must be even for 4-bit packing.");
+    TORCH_CHECK(packed_in_features == in_features / 2, "Packed exponent tensor has incorrect inner dimension.");
+    TORCH_CHECK(w_packed_exp.size(0) == out_features, "w_packed_exp dim 0 mismatch");
     TORCH_CHECK(a_quant.size(0) == in_features, "a_quant size mismatch");
     TORCH_CHECK(output.size(0) == out_features, "output size mismatch");
 
@@ -69,20 +75,20 @@ torch::Tensor logmatvec_forward(
     // Get current CUDA stream
     cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
-    // Launch Kernel via the launcher function
+    // Launch Kernel via the launcher function - Updated call
     LogMatVecKernelLauncher(
         a_quant.data_ptr<int>(),
-        w_exp.data_ptr<int>(),
-        // PyTorch kInt8 corresponds to int8_t, cast to signed char* for the kernel
-        reinterpret_cast<const signed char*>(w_sign.data_ptr<int8_t>()),
+        w_packed_exp.data_ptr<int8_t>(), // Pass packed exponents ptr
+        reinterpret_cast<const signed char*>(w_sign.data_ptr<int8_t>()), // Signs ptr
         output.data_ptr<float>(),
-        static_cast<float>(delta_lsb), // Cast double to float for the kernel
+        static_cast<float>(delta_lsb),
+        min_exp,                      // Pass min_exp
         in_features,
         out_features,
         blocks,
         threads,
         shared_mem_size,
-        stream // Pass the stream
+        stream
     );
 
     // Check for CUDA errors after kernel launch (optional but recommended for debugging)
@@ -92,11 +98,11 @@ torch::Tensor logmatvec_forward(
     return output;
 }
 
-// Boilerplate for Python binding using Pybind11
+// Boilerplate for Python binding using Pybind11 - Updated function name
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def(
-        "forward", // Python function name
-        &logmatvec_forward, // C++ function pointer
-        "LogNet Style Matrix-Vector Forward Pass (CUDA)" // Docstring
+        "forward_packed4bit", // New Python function name
+        &logmatvec_forward_packed4bit, // C++ function pointer
+        "LogNet Style Matrix-Vector Forward Pass with Packed 4-bit Exponents (CUDA)" // Docstring
     );
 }

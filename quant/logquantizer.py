@@ -12,17 +12,19 @@ class LogQuantizer(QuantizerInterface):
         self.bits = -1 # To track if configured
         # Initialize buffers for exponent range
         # Use float dtype for buffers to avoid potential type issues later
-        self.register_buffer('min_exp', torch.tensor(0.0)) 
-        self.register_buffer('max_exp', torch.tensor(0.0))
+        self.register_buffer('min_exp', torch.tensor(0.0)) # Store as float for consistency
+        self.register_buffer('max_exp', torch.tensor(0.0)) # Store as float for consistency
+        self.register_buffer('_exponent_range', torch.tensor(0.0)) # Store range size
         self.register_buffer('_is_ready', torch.tensor(False))
 
 
     def configure(self, bits, **kwargs):
         """
-        Configure the quantizer. For basic log quantization, 
-        bits aren't directly used in the formula but stored for potential future use 
-        (e.g., limiting exponent range).
+        Configure the quantizer. For log quantization with packing,
+        bits determine the number of representable exponent levels.
         """
+        if bits <= 1:
+            raise ValueError("LogQuantizer requires bits > 1.")
         self.bits = bits
 
 
@@ -58,9 +60,25 @@ class LogQuantizer(QuantizerInterface):
         # The range includes max_exp_val down to min_exp_val
         min_exp_val = max_exp_val - num_positive_levels + 1
 
-        # Store the calculated exponents
+        exponent_range_size = max_exp_val - min_exp_val + 1
+
+        # --- Check if the range fits within the allocated bits ---
+        # Number of levels available for magnitude = 2**(bits - 1)
+        available_levels = 2**(self.bits - 1)
+        if exponent_range_size > available_levels:
+            print(
+                f"Warning: LogQuantizer exponent range ({exponent_range_size}) exceeds "
+                f"levels available for {self.bits} bits ({available_levels}). "
+                f"Clamping range."
+            )
+            # Adjust min_exp to fit the available levels
+            min_exp_val = max_exp_val - available_levels + 1
+            exponent_range_size = available_levels # Update range size
+
+        # Store the calculated exponents and range size
         self.max_exp.copy_(max_exp_val)
         self.min_exp.copy_(min_exp_val)
+        self._exponent_range.copy_(exponent_range_size)
         self._is_ready.copy_(torch.tensor(True)) # Mark as ready
 
         return
@@ -106,8 +124,60 @@ class LogQuantizer(QuantizerInterface):
             clamped_log2_full = torch.zeros_like(x) # Or handle appropriately
         # --- End non-zero calculation ---
 
-        # Return both the quantized value and the clamped exponent
-        return q.to(x.dtype), clamped_log2_full.to(x.device)
+        # Return the quantized value, the integer exponent, and the sign
+        return q.to(x.dtype), clamped_log2_full.to(torch.int32), sign.to(torch.int8)
+
+
+    def pack(self, exponents, signs):
+        """
+        Packs mapped 4-bit exponents into int8 tensors.
+        Assumes exponents are int32 and signs are int8.
+        Requires find_params to have been called.
+        """
+        if not self.ready():
+            raise RuntimeError("LogQuantizer must be configured and find_params called before packing.")
+        if self.bits != 4:
+            raise NotImplementedError("Packing currently only implemented for bits=4.")
+
+        dev = exponents.device
+        if signs.device != dev:
+            raise ValueError("Exponents and signs must be on the same device.")
+
+        # Map exponents to 0-15 range. Level 0 is reserved for true zero?
+        # Let's map min_exp -> 0, max_exp -> N-1 where N = range_size
+        # Map clamped exponents to an unsigned integer range [0, N-1]
+        # N = self._exponent_range.item() # Number of levels
+        min_exp_val = self.min_exp.item()
+        mapped_exponents = (exponents - min_exp_val).to(torch.uint8) # Cast to uint8 after offset
+
+        # Clamp mapped exponents just in case (shouldn't be needed if find_params/quantize are correct)
+        # max_map_val = self._exponent_range.item() - 1
+        # mapped_exponents = torch.clamp(mapped_exponents, 0, max_map_val)
+
+        # Handle true zeros (where sign is 0). We need a specific packed code for zero.
+        # Let's use the mapped exponent value 15 (0xF) to represent zero?
+        # Or should we handle it via the sign tensor? Let's keep sign separate.
+        # The kernel will check the sign first. If sign is 0, exponent doesn't matter.
+
+        # Ensure the mapped exponents fit in 4 bits (0-15)
+        if torch.any(mapped_exponents > 15):
+             print(f"Warning: Mapped exponents exceed 4-bit range (0-15). Clamping.")
+             mapped_exponents = torch.clamp(mapped_exponents, 0, 15)
+
+        # Packing: Combine two 4-bit values into one int8
+        # Ensure the input feature dimension is even for simplicity
+        if exponents.shape[-1] % 2 != 0:
+            raise ValueError("Last dimension of exponents must be even for 4-bit packing.")
+
+        # Reshape to group elements in pairs
+        # Example: (N_out, M_in) -> (N_out, M_in // 2, 2)
+        reshaped_exponents = mapped_exponents.view(*exponents.shape[:-1], -1, 2)
+
+        # Pack: high_nibble = exp1 << 4, low_nibble = exp2
+        packed_exponents = (reshaped_exponents[..., 0] << 4) | reshaped_exponents[..., 1]
+
+        # Return packed exponents (int8) and original signs (int8)
+        return packed_exponents.to(torch.int8), signs
 
 
     def ready(self):
