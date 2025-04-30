@@ -178,47 +178,51 @@ if can_run_check:
 
     # 7. Simulate the Kernel Operation with Packing/Unpacking in PyTorch
     print("Simulating exact kernel operation with packing in Python/PyTorch...")
-    # --- Simulation Logic ---
-    # Use uint8 view for unpacking simulation to correctly handle 0-255 range
+    # --- Vectorized Simulation Logic ---
+    # Perform simulation on CPU to avoid GPU OOM during check, use float64 for precision
     sim_packed_exp_uint8 = w_packed_exp_kernel_check.cpu().view(torch.uint8)
-    sim_signs = w_sign_kernel_check.cpu()
-    sim_a_quant = a_quant_kernel_check.cpu()
-    sim_output = torch.zeros(N_out, dtype=torch.float64) # Use float64 for accumulator precision
+    sim_signs = w_sign_kernel_check.cpu().float() # Use float for calculations
+    sim_a_quant = a_quant_kernel_check.cpu().float() # Use float for calculations
+    min_exp_check_f = float(min_exp_check) # Use float
+    delta_lsb_kernel_check_f = float(delta_lsb_kernel_check)
 
-    for r in range(N_out):
-        accumulator = 0.0
-        for c_packed in range(packed_in_features_rand): # Iterate over packed columns
-            # Read as uint8 item (0-255)
-            packed_byte_uint = sim_packed_exp_uint8[r, c_packed].item()
-            # Unpack 4-bit mapped exponents (works correctly on unsigned byte)
-            mapped_exp1 = (packed_byte_uint >> 4) & 0x0F
-            mapped_exp2 = packed_byte_uint & 0x0F
+    # Unpack exponents using vectorized operations
+    mapped_exp1 = (sim_packed_exp_uint8 >> 4).float() # High nibble
+    mapped_exp2 = (sim_packed_exp_uint8 & 0x0F).float() # Low nibble
 
-            # Unmap to actual exponents
-            exponent1 = mapped_exp1 + min_exp_check
-            exponent2 = mapped_exp2 + min_exp_check
+    # Unmap to actual exponents
+    exponent1 = mapped_exp1 + min_exp_check_f
+    exponent2 = mapped_exp2 + min_exp_check_f
 
-            # Get corresponding signs and activations
-            base_idx = c_packed * 2
-            sign1 = sim_signs[r, base_idx].item()
-            sign2 = sim_signs[r, base_idx + 1].item()
-            act1 = sim_a_quant[base_idx].item()
-            act2 = sim_a_quant[base_idx + 1].item()
+    # Get signs for each position
+    # Shape: (N_out, M_in) -> (N_out, M_in/2)
+    sign1 = sim_signs[:, 0::2]
+    sign2 = sim_signs[:, 1::2]
 
-            # Accumulate first weight contribution
-            if sign1 != 0:
-                term1 = float(act1) * (2.0 ** exponent1)
-                accumulator += term1 if sign1 > 0 else -term1
+    # Get activations for each position
+    # Shape: (M_in) -> (M_in/2)
+    act1 = sim_a_quant[0::2]
+    act2 = sim_a_quant[1::2]
 
-            # Accumulate second weight contribution
-            if sign2 != 0:
-                term2 = float(act2) * (2.0 ** exponent2)
-                accumulator += term2 if sign2 > 0 else -term2
+    # Calculate powers of 2 (use float64 for intermediate pow for precision)
+    pow2_exp1 = torch.pow(2.0, exponent1.double())
+    pow2_exp2 = torch.pow(2.0, exponent2.double())
 
-        sim_output[r] = accumulator * delta_lsb_kernel_check
-    # --- End Simulation ---
+    # Calculate contributions for each packed pair element-wise
+    # Need to broadcast activations: act1/act2 (M_in/2) -> (1, M_in/2)
+    # pow2_exp1/2 and sign1/2 are (N_out, M_in/2)
+    term1 = (act1.double().unsqueeze(0) * pow2_exp1) * sign1.double()
+    term2 = (act2.double().unsqueeze(0) * pow2_exp2) * sign2.double()
 
-    simulated_output_check = sim_output.to(device=DEV, dtype=torch.float32) # Move result to GPU
+    # Sum contributions across the packed dimension (dim=1)
+    # Add term1 and term2 contributions element-wise first, then sum
+    simulated_output_raw = torch.sum(term1 + term2, dim=1) # Shape (N_out)
+
+    # Scale by activation LSB
+    simulated_output_check = (simulated_output_raw * delta_lsb_kernel_check_f).float() # Final cast to float32
+    # --- End Vectorized Simulation ---
+
+    simulated_output_check = simulated_output_check.to(device=DEV) # Move final result to GPU
 
     # 8. Compare Kernel Output with Simulation and FP32
     print("Comparing outputs...")
