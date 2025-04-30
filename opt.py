@@ -404,21 +404,28 @@ def opt_sequential(model, dataloader, quantizer_name, dev): # quantizer_name is 
 
 # --- Evaluation Function ---
 @torch.no_grad()
-def opt_eval(model, testenc, dev): # 'dev' parameter is less relevant if model is multi-gpu
+def opt_eval(model, testenc, dev): # Use the single 'dev' parameter now
     print('Evaluating ...')
 
-    # Check if model is distributed, otherwise use the single 'dev'
-    if hasattr(model, 'gpus') and len(model.gpus) > 1:
-        print(f"  Evaluating on multi-GPU setup: {model.gpus}")
-        input_device = model.gpus[0]
-        output_device = model.gpus[-1]
-    else:
-        # Fallback to single device if not distributed
-        print(f"  Evaluating on single device: {dev}")
-        input_device = dev
-        output_device = dev
-        # Ensure model is on the single device if not already distributed
-        model.to(input_device)
+    # Force model to the designated evaluation device, overriding any multi-GPU setup
+    print(f"  Moving model to evaluation device: {dev}")
+    model.to(dev)
+    # Remove the gpus attribute if it exists from benchmarking to prevent confusion
+    if hasattr(model, 'gpus'):
+        delattr(model, 'gpus')
+        # Unwrap layers from MoveModule if necessary (model.to(dev) might handle this, but explicit is safer)
+        # Use try-except as MoveModule might not be defined if benchmark wasn't run multi-gpu
+        try:
+            from gptq import MoveModule # Import locally for isinstance check
+            layers = model.model.decoder.layers
+            for i in range(len(layers)):
+                if isinstance(layers[i], MoveModule):
+                     layers[i] = layers[i].module
+        except (NameError, ImportError): # Handle if MoveModule isn't defined/imported
+            pass
+        except AttributeError: # Handle cases where model structure might differ
+             print("  Warning: Could not access layers to unwrap MoveModule.")
+             pass
 
 
     testenc = testenc.input_ids # Assuming testloader passed is actually testenc from get_loaders
@@ -454,31 +461,31 @@ def opt_eval(model, testenc, dev): # 'dev' parameter is less relevant if model i
     nlls = []
     loss_fct = nn.CrossEntropyLoss()
     for i in range(nsamples):
-        # Move batch to the input device
-        batch = testenc[:, (i * model.seqlen):((i + 1) * model.seqlen)].to(input_device)
-        # Standard forward pass for evaluation - MoveModule handles intermediate transfers
+        # Move batch to the single evaluation device
+        batch = testenc[:, (i * model.seqlen):((i + 1) * model.seqlen)].to(dev)
+        # Standard forward pass for evaluation (model is now entirely on 'dev')
         outputs = model(batch)
-        lm_logits = outputs.logits # Logits will be on output_device
+        lm_logits = outputs.logits # Logits will be on 'dev'
 
         # Shift logits and labels for next token prediction loss
         shift_logits = lm_logits[:, :-1, :].contiguous()
-        # Move labels to the output device for loss calculation
-        shift_labels = batch[:, 1:].to(output_device)
+        # Labels are already on 'dev' from batch assignment
+        shift_labels = batch[:, 1:]
 
-        # Calculate loss on the output device
+        # Calculate loss on 'dev'
         loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
         neg_log_likelihood = loss.float() * model.seqlen # Use actual sequence length if different
         nlls.append(neg_log_likelihood)
         # Optional: Clear cache between samples if memory is very tight
         # torch.cuda.empty_cache()
 
-    # Stack NLLs (likely on output_device) and calculate PPL
+    # Stack NLLs (on 'dev') and calculate PPL
     ppl = torch.exp(torch.stack(nlls).sum() / (nsamples * model.seqlen))
     print(f"Perplexity: {ppl.item():.4f}")
 
     model.config.use_cache = use_cache # Restore use_cache setting
 
-    # Move model back to CPU (this should consolidate it)
+    # Move model back to CPU
     model.cpu()
     # Explicitly clear GPU memory after moving model to CPU
     torch.cuda.empty_cache()
