@@ -142,7 +142,7 @@ __global__ void LogMatVecKernelPacked4bit(
 // It sets up the <<<...>>> kernel launch syntax.
 void LogMatVecKernelLauncher(
     const int* a_quant,
-    const int* w_exp,
+    const int8_t* w_packed_exp, // Corrected type to match declaration and usage
     const signed char* w_sign,
     float* output,
     const float delta_lsb,
