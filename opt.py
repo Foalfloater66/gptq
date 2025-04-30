@@ -426,19 +426,24 @@ def opt_eval(model, testenc, dev): # 'dev' parameter is less relevant if model i
     model.config.use_cache = False
     layers = model.model.decoder.layers
 
-    # Ensure model components are on the evaluation device
-    model.model.decoder.embed_tokens = model.model.decoder.embed_tokens.to(dev)
-    model.model.decoder.embed_positions = model.model.decoder.embed_positions.to(dev)
-    if hasattr(model.model.decoder, 'project_in') and model.model.decoder.project_in:
-        model.model.decoder.project_in = model.model.decoder.project_in.to(dev)
-    if hasattr(model.model.decoder, 'project_out') and model.model.decoder.project_out:
-        model.model.decoder.project_out = model.model.decoder.project_out.to(dev)
-    if model.model.decoder.final_layer_norm is not None:
-        model.model.decoder.final_layer_norm = model.model.decoder.final_layer_norm.to(dev)
-    model.lm_head = model.lm_head.to(output_device) # Ensure lm_head is on output device
+    # If evaluating on multi-GPU, the devices are set by opt_multigpu.
+    # If evaluating on single GPU, model.to(input_device) handles placement.
+    # The explicit moves below are only needed if NOT using model.to(dev) in the single-GPU case,
+    # but they conflict with the multi-GPU case.
+    # Let's remove them as they are either redundant or incorrect for multi-GPU.
 
-    # Ensure necessary components are on the correct devices if multi-GPU
-    # Embeddings should be on input_device, final_ln/lm_head on output_device
+    # model.model.decoder.embed_tokens = model.model.decoder.embed_tokens.to(input_device) # Handled by model.to or opt_multigpu
+    # model.model.decoder.embed_positions = model.model.decoder.embed_positions.to(input_device) # Handled by model.to or opt_multigpu
+    # if hasattr(model.model.decoder, 'project_in') and model.model.decoder.project_in:
+    #     model.model.decoder.project_in = model.model.decoder.project_in.to(input_device) # Handled by model.to or opt_multigpu
+    # if hasattr(model.model.decoder, 'project_out') and model.model.decoder.project_out:
+    #     model.model.decoder.project_out = model.model.decoder.project_out.to(output_device) # Handled by opt_multigpu
+    # if model.model.decoder.final_layer_norm is not None:
+    #     model.model.decoder.final_layer_norm = model.model.decoder.final_layer_norm.to(output_device) # Handled by opt_multigpu
+    # model.lm_head = model.lm_head.to(output_device) # Handled by opt_multigpu
+
+    # Ensure necessary components are on the correct devices if multi-GPU (Handled by opt_multigpu)
+    # Embeddings should be on input_device, final_ln/lm_head on output_device (Handled by opt_multigpu)
     # This should already be handled by opt_multigpu if it was called.
     # If evaluating a model *not* processed by opt_multigpu, model.to(dev) handles it.
 
