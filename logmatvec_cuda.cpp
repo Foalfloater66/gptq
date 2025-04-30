@@ -1,6 +1,7 @@
 #include <torch/extension.h>
 #include <vector>
 #include <cstdint> // For int64_t and int8_t
+#include <cuda_runtime.h> // Include CUDA runtime headers for dim3, cudaStream_t
 
 // Forward declaration of the CUDA kernel launcher function (defined in .cu file)
 void LogMatVecKernelLauncher(
