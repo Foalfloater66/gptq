@@ -86,9 +86,9 @@ __global__ void LogMatVecKernelPacked4bit(
         int base_idx = packed_idx * 2;
 
         // Calculate index for packed weight matrix (row-major)
-        int packed_weight_idx = output_row * packed_in_features + packed_idx;
+        // int packed_weight_idx = output_row * packed_in_features + packed_idx; // Duplicate removed
         // Calculate base index for activations (corresponding to first weight in pair)
-        int base_idx = packed_idx * 2;
+        // int base_idx = packed_idx * 2; // Duplicate removed
 
         // Read packed byte and unpack 4-bit codes
         int8_t packed_byte = w_packed_4bit[packed_weight_idx];
@@ -184,99 +184,4 @@ void LogMatVecKernelLauncher(
     );
 }
 
-
-    // Each block computes one output feature
-    const int output_row = blockIdx.x;
-
-    if (output_row >= out_features) {
-        return;
-    }
-
-    // Accumulator for the dot product (use double for float accumulation precision)
-    double accumulator = 0.0;
-
-    // Each thread sums a portion of the dot product, processing two weights at a time
-    int packed_in_features = in_features / 2;
-    for (int packed_idx = threadIdx.x; packed_idx < packed_in_features; packed_idx += blockDim.x) {
-        int packed_weight_idx = output_row * packed_in_features + packed_idx;
-        int base_idx = packed_idx * 2;
-
-        int8_t packed_byte = w_packed_exp[packed_weight_idx];
-        uint8_t mapped_exp1, mapped_exp2;
-        unpack_4bit(packed_byte, mapped_exp1, mapped_exp2);
-
-        signed char sign1 = w_sign[output_row * in_features + base_idx];
-        signed char sign2 = w_sign[output_row * in_features + base_idx + 1];
-
-        int activation1_int = a_quant[base_idx];
-        int activation2_int = a_quant[base_idx + 1];
-
-        // --- Process first weight in pair using float multiplication ---
-        if (sign1 != 0) {
-            int exponent1 = static_cast<int>(mapped_exp1) + min_exp;
-            // Calculate float weight value
-            float weight1_float = powf(2.0f, static_cast<float>(exponent1));
-            // Multiply float weight by activation (cast activation to double for intermediate product)
-            double term1 = static_cast<double>(activation1_int) * static_cast<double>(weight1_float);
-            accumulator += (sign1 > 0) ? term1 : -term1;
-        }
-
-        // --- Process second weight in pair using float multiplication ---
-        if (sign2 != 0) {
-            int exponent2 = static_cast<int>(mapped_exp2) + min_exp;
-            // Calculate float weight value
-            float weight2_float = powf(2.0f, static_cast<float>(exponent2));
-            // Multiply float weight by activation
-            double term2 = static_cast<double>(activation2_int) * static_cast<double>(weight2_float);
-            accumulator += (sign2 > 0) ? term2 : -term2;
-        }
-    }
-
-    // --- Block-level reduction using shared memory (using double) ---
-    extern __shared__ double sdata_double[]; // Use double for shared memory
-    sdata_double[threadIdx.x] = accumulator;
-    __syncthreads();
-
-    for (int offset = blockDim.x / 2; offset > 0; offset >>= 1) {
-        if (threadIdx.x < offset) {
-            sdata_double[threadIdx.x] += sdata_double[threadIdx.x + offset];
-        }
-        __syncthreads();
-    }
-
-    // Lead thread writes the final scaled result
-    if (threadIdx.x == 0) {
-        // Cast the final double result to float before scaling
-        output[output_row] = static_cast<float>(sdata_double[0]) * delta_lsb;
-    }
-}
-
-// Removed Float Multiplication Launcher
-    const int* a_quant,
-    const int8_t* w_packed_exp,
-    const signed char* w_sign,
-    float* output,
-    const float delta_lsb,
-    const int min_exp,
-    const int in_features,
-    const int out_features,
-    const dim3 blocks,
-    const dim3 threads,
-    const size_t shared_mem_size, // Will need adjustment for double
-    cudaStream_t stream)
-{
-    // Adjust shared memory size for double accumulator
-    size_t shared_mem_double_size = threads.x * sizeof(double);
-
-    // Launch the __global__ kernel for packed 4-bit with float multiplication
-    LogMatVecKernelPacked4bit_FloatMul<<<blocks, threads, shared_mem_double_size, stream>>>( // Call new kernel
-        a_quant,
-        w_packed_exp,
-        w_sign,
-        output,
-        delta_lsb,
-        min_exp,
-        in_features,
-        out_features
-    );
-}
+// Removed Float Multiplication related code remnants
