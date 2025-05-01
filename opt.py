@@ -394,8 +394,86 @@ def opt_sequential(model, dataloader, quantizer_name, dev): # quantizer_name is 
 
     print(f"Logarithmic quantization finished. Replaced {layers_replaced_count} layers.")
     model.config.use_cache = use_cache
-    return {}
+    return {} # Return empty dict as quantizers aren't generated here
 # --- End LogPack4bit Sequential Logic ---
+
+
+# --- Loading Function for Saved LogPack4bit Models ---
+def load_logpack4bit(model_name, checkpoint_path):
+    """
+    Loads a LogPack4bit quantized model.
+
+    This involves:
+    1. Getting the base model structure.
+    2. Replacing nn.Linear layers (that would have been quantized)
+       with LogMatVecPackedLinear layer stubs.
+    3. Loading the saved state_dict containing the packed weights and parameters.
+    """
+    print(f"Loading LogPack4bit model structure for {model_name}...")
+    # Get the base model structure (usually FP16)
+    model = get_opt(model_name)
+    model.eval() # Set to evaluation mode
+
+    # --- Replace Linear layers with LogMatVecPackedLinear ---
+    # This needs to mirror the replacement logic used during quantization
+    # to ensure the state_dict keys match the model structure.
+    print("Replacing eligible Linear layers with LogMatVecPackedLinear stubs...")
+    layers_replaced_count = 0
+    # Ensure we are iterating through the correct layers attribute
+    if hasattr(model, 'model') and hasattr(model.model, 'decoder') and hasattr(model.model.decoder, 'layers'):
+        layers = model.model.decoder.layers
+        for i in range(len(layers)):
+            layer = layers[i]
+            # Use find_layers to find nn.Linear modules within each decoder layer
+            layer_modules = find_layers(layer, [nn.Linear])
+
+            for name, lin_layer in layer_modules.items():
+                # Check if the layer is eligible for replacement (must have even in_features)
+                if isinstance(lin_layer, nn.Linear) and lin_layer.in_features % 2 == 0:
+                    # Create the custom layer stub. Its parameters (packed_weights, bias, etc.)
+                    # will be populated by load_state_dict.
+                    custom_layer = LogMatVecPackedLinear(lin_layer.in_features, lin_layer.out_features)
+
+                    # Replace the original layer with the custom one in the model structure
+                    parent_name = name.rsplit('.', 1)[0] if '.' in name else ''
+                    sub_layer_name = name.rsplit('.', 1)[-1]
+                    try:
+                        if parent_name:
+                            parent_module = layer.get_submodule(parent_name)
+                        else:
+                            parent_module = layer # Direct attribute of the layer
+                        setattr(parent_module, sub_layer_name, custom_layer)
+                        layers_replaced_count += 1
+                    except AttributeError:
+                         print(f"  Warning: Could not find parent module {parent_name} for {name} in layer {i}. Skipping replacement.")
+
+        print(f"Replaced {layers_replaced_count} layers with LogMatVecPackedLinear stubs.")
+    else:
+        print("Warning: Could not find model.model.decoder.layers. Skipping layer replacement for loading.")
+    # --- End Replacement ---
+
+    print(f"Loading state dict from {checkpoint_path}...")
+    # Load state dict onto CPU first to avoid GPU memory issues if the model is large
+    state_dict = torch.load(checkpoint_path, map_location='cpu')
+
+    # Handle potential prefixes if the model was saved using DataParallel or DDP
+    # state_dict = {k.replace('module.', ''): v for k, v in state_dict.items()}
+
+    # Load the state dictionary into the modified model structure
+    try:
+        model.load_state_dict(state_dict, strict=True) # Use strict=True to catch mismatches
+        print("LogPack4bit model state_dict loaded successfully.")
+    except RuntimeError as e:
+        print(f"Error loading state_dict: {e}")
+        print("This might indicate a mismatch between the saved checkpoint and the expected model structure.")
+        # Optionally, you could try strict=False, but it might hide issues:
+        # model.load_state_dict(state_dict, strict=False)
+        # print("Loaded state_dict with strict=False. Some weights might be missing or unexpected.")
+        raise e # Re-raise the error to halt execution
+
+    model.eval() # Ensure model is in eval mode after loading
+    return model
+# --- End Loading Function ---
 
 
 # --- Evaluation Function ---
@@ -708,9 +786,12 @@ def benchmark(model, input_ids, check=False):
             del out
         sync()
         import numpy as np
-        print('Median:', np.median(times))
+        median_time = np.median(times)
+        print(f'Median latency: {median_time:.6f} s')
         if check:
             print('PPL:', torch.exp(tot / (input_ids.numel() - 1)).item())
+        # Return the median time for comparison
+        return median_time
 
 
 if __name__ == '__main__':
@@ -831,13 +912,38 @@ if __name__ == '__main__':
 
     # --- Load Model ---
     if args.load:
-        # TODO: Need a specific loading function for LogPack4bit models if saving is implemented
+        print(f"Loading model from: {args.load}")
         if is_logpack_mode:
-             raise NotImplementedError("Loading saved LogPack4bit models not yet implemented.")
-        else:
-             # Assuming load_quant3 is for GPTQ 3bit - might need adjustment for other GPTQ bits
+             # Use the new loading function for LogPack4bit
+             model = load_logpack4bit(args.model, args.load)
+        elif is_gptq_mode:
+             # Assuming load_quant3 is appropriate for GPTQ models saved previously
+             # Might need adjustments if saving format for GPTQ changed
              print("Loading GPTQ quantized model...")
-             model = load_quant3(args.model, args.load)
+             # Ensure load_quant3 exists and is compatible
+             try:
+                 model = load_quant3(args.model, args.load)
+             except NameError:
+                 print("Error: load_quant3 function not found or defined.")
+                 print("Cannot load GPTQ model. Ensure relevant functions are available.")
+                 exit(1)
+             except Exception as e:
+                 print(f"Error loading GPTQ model using load_quant3: {e}")
+                 exit(1)
+        else: # Includes RTN mode - loading isn't typically done/needed for RTN
+             print(f"Warning: Loading not specifically implemented or typically used for quant_mode={args.quant_mode}.")
+             print("Attempting generic model loading (may fail if quantization needed)...")
+             # Fallback to base model loading - this likely won't load a quantized state correctly
+             model = get_opt(args.model)
+             try:
+                 # Try loading state dict directly - might work for FP16 saves, unlikely for quantized
+                 state_dict = torch.load(args.load, map_location='cpu')
+                 model.load_state_dict(state_dict)
+                 print("Loaded state dict directly into base model.")
+             except Exception as e:
+                 print(f"Could not load state dict directly: {e}")
+                 print("Proceeding with base FP16 model structure.")
+             model.eval()
     else:
         model = get_opt(args.model)
         model.eval()
@@ -879,20 +985,83 @@ if __name__ == '__main__':
         print("Running FP16 model (wbits=16).")
 
 
-    # --- Benchmarking ---
-    if args.benchmark:
+    # --- Benchmarking (Comparison) ---
+    median_fp16_time = None
+    median_quant_time = None
+    if args.benchmark > 0:
+        print("\n--- Benchmarking FP16 Model ---")
+        # Load a fresh FP16 model instance for benchmarking
+        fp16_model = get_opt(args.model)
+        fp16_model.eval()
+
         gpus = [torch.device('cuda:%d' % i) for i in range(torch.cuda.device_count())]
         if len(gpus) > 1:
-            opt_multigpu(model, gpus)
+            print(f"Using {len(gpus)} GPUs for FP16 benchmark.")
+            opt_multigpu(fp16_model, gpus)
         else:
-            model = model.to(DEV)
-        if args.benchmark:
-            input_ids = next(iter(dataloader))[0][:, :args.benchmark]
-            benchmark(model, input_ids, check=args.check)
-    if args.load:
-        exit()
+            print(f"Using single GPU {DEV} for FP16 benchmark.")
+            fp16_model = fp16_model.to(DEV)
 
-    datasets = ['wikitext2', 'ptb', 'c4'] 
+        # Get benchmark data (use the first batch from the dataloader)
+        # Ensure dataloader is still available or reload if necessary
+        # Assuming dataloader is the list created earlier
+        if not dataloader:
+             print("Error: Dataloader is empty, cannot get benchmark data.")
+             exit(1)
+        # Use next(iter()) to get the first batch, matching the original code
+        input_ids = next(iter(dataloader))[0][:, :args.benchmark]
+
+        median_fp16_time = benchmark(fp16_model, input_ids, check=args.check)
+        print(f"FP16 Median Time: {median_fp16_time:.6f} s")
+
+        # Clean up FP16 model from GPU memory
+        del fp16_model
+        torch.cuda.empty_cache()
+        print("--- End FP16 Benchmark ---")
+
+    # Now, benchmark the quantized/loaded model (using the 'model' variable from earlier)
+    if args.benchmark > 0 and (args.wbits < 16 or args.load):
+        print("\n--- Benchmarking Quantized/Loaded Model ---")
+        gpus = [torch.device('cuda:%d' % i) for i in range(torch.cuda.device_count())]
+        if len(gpus) > 1:
+            print(f"Using {len(gpus)} GPUs for quantized benchmark.")
+            # opt_multigpu should ideally be called *after* quantization/loading
+            # if the model isn't already configured for multi-GPU by the loading/quant process.
+            # Let's assume 'model' needs multi-gpu setup here if applicable.
+            # Check if model already has gpus attribute from loading potentially
+            if not hasattr(model, 'gpus'):
+                 opt_multigpu(model, gpus)
+        else:
+            print(f"Using single GPU {DEV} for quantized benchmark.")
+            model = model.to(DEV) # Ensure model is on the correct device
+
+        # Reuse input_ids from FP16 benchmark
+        if 'input_ids' not in locals() or input_ids is None:
+             print("Error: Benchmark input_ids not available.")
+             exit(1)
+
+        median_quant_time = benchmark(model, input_ids, check=args.check)
+        print(f"Quantized Model Median Time: {median_quant_time:.6f} s")
+
+        # Calculate and print speedup
+        if median_fp16_time and median_quant_time and median_quant_time > 0:
+            speedup = median_fp16_time / median_quant_time
+            print(f"\nSpeedup (FP16 / Quantized): {speedup:.2f}x")
+        else:
+            print("\nCould not calculate speedup (missing benchmark times).")
+        print("--- End Quantized Benchmark ---")
+
+    # --- Original Load Exit Logic ---
+    # If we loaded a model, we might just want to benchmark or evaluate, then exit.
+    # The evaluation loop below will run on the loaded/quantized model.
+    # If only benchmarking was desired, the user might expect an exit here.
+    # However, the current structure continues to evaluation, which is also reasonable.
+    # Let's keep the original exit logic placement after the eval loop.
+    # if args.load:
+    #     exit() # Moved lower
+
+    # --- Evaluation Loop ---
+    datasets = ['wikitext2', 'ptb', 'c4']
     if args.new_eval:
       datasets = ['wikitext2', 'ptb-new', 'c4-new']
     for dataset in datasets: 
@@ -902,7 +1071,15 @@ if __name__ == '__main__':
         print(dataset)
         opt_eval(model, testloader, DEV)
 
+    # --- Final Exit for --load ---
+    # If we loaded a model, evaluated it, maybe saved it, exit now.
+    if args.load:
+        print("Exiting after processing loaded model.")
+        exit()
+
     # --- Save Model State ---
+    # This saving logic now correctly applies to models that were either
+    # quantized in this run or loaded and then potentially evaluated/benchmarked.
     if args.save:
         print(f"\nSaving quantized model state_dict to {args.save}...")
         # Ensure the model is on the CPU before saving to avoid GPU memory in the file
