@@ -761,10 +761,10 @@ if __name__ == '__main__':
         '--sym', action='store_true',
         help='Whether to perform symmetric quantization (Currently affects GPTQ/RTN, not LogPack activation quant).'
     )
-    # parser.add_argument(
-    #     '--save', type=str, default='',
-    #     help='Save quantized checkpoint under this name.'
-    # )
+    parser.add_argument(
+        '--save', type=str, default='',
+        help='Save quantized checkpoint under this name.'
+    )
     parser.add_argument(
         '--load', type=str, default='',
         help='Load quantized model.'
@@ -902,14 +902,13 @@ if __name__ == '__main__':
         print(dataset)
         opt_eval(model, testloader, DEV)
 
+    # --- Save Model State ---
     if args.save:
-        if is_logpack_mode:
-            print("Saving LogPack4bit model not implemented.")
-            # TODO: Implement saving logic for LogPack4bit model state_dict
-            # This would involve saving the packed buffers and parameters from LogMatVecPackedLinear layers
-        elif is_gptq_mode:
-            # Assuming opt_pack3 is for GPTQ 3bit
-            opt_pack3(model, quantizers)
-            torch.save(model.state_dict(), args.save)
-        else:
-            print("Saving only supported for GPTQ mode currently.")
+        print(f"\nSaving quantized model state_dict to {args.save}...")
+        # Ensure the model is on the CPU before saving to avoid GPU memory in the file
+        # and potential issues if loading on a machine with different GPU setup.
+        model.cpu()
+        torch.save(model.state_dict(), args.save)
+        print("Model saved.")
+        # Note: If further operations requiring the model on GPU were planned here,
+        # it would need to be moved back, e.g., model.to(DEV)
