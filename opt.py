@@ -296,52 +296,83 @@ def opt_sequential(model, dataloader, quantizer_name, dev): # quantizer_name is 
     model.cpu()
     torch.cuda.empty_cache() # Clear cache before starting
 
-    # --- Pre-process Embeddings ---
-    # Move necessary embedding layers to GPU temporarily
-    embed_tokens = model.model.decoder.embed_tokens.to(dev)
-    embed_positions = model.model.decoder.embed_positions.to(dev)
+    # --- Multi-GPU Setup (if applicable) ---
+    gpus = []
+    if torch.cuda.device_count() > 1:
+        print(f"Detected {torch.cuda.device_count()} GPUs. Using multi-GPU for calibration.")
+        # Ensure DEV is the primary GPU (e.g., cuda:0 if CUDA_VISIBLE_DEVICES=0,1,2,3)
+        # The opt_multigpu function expects a list of torch.device objects
+        available_gpus = [torch.device(f'cuda:{i}') for i in range(torch.cuda.device_count())]
+        # Assign gpus based on availability, DEV might be specified differently
+        # Let's assume opt_multigpu handles the distribution logic based on available devices
+        gpus = available_gpus # Use all available GPUs
+        opt_multigpu(model, gpus) # Distribute model layers
+        calibration_device = gpus[0] # Input goes to the first GPU
+        print(f"  Model distributed across GPUs: {gpus}")
+    else:
+        print("Single GPU detected. Using standard sequential calibration.")
+        calibration_device = dev # Use the primary device
+        # No need to call opt_multigpu
+    # --- End Multi-GPU Setup ---
+
+
+    # --- Pre-process Embeddings (on calibration_device) ---
+    # Move necessary embedding layers to the primary GPU temporarily
+    embed_tokens = model.model.decoder.embed_tokens.to(calibration_device)
+    embed_positions = model.model.decoder.embed_positions.to(calibration_device)
     project_in = None
     if hasattr(model.model.decoder, 'project_in') and model.model.decoder.project_in:
-        project_in = model.model.decoder.project_in.to(dev)
+        project_in = model.model.decoder.project_in.to(calibration_device)
 
     # Store initial hidden states for each sample on CPU
     initial_hidden_states_cpu = []
-    print("  Processing initial embeddings for calibration samples...")
+    print(f"  Processing initial embeddings for calibration samples on {calibration_device}...")
     with torch.no_grad(): # Ensure no gradients are computed
         for i in range(args.nsamples):
-            batch = dataloader[i][0].to(dev) # Move current batch to GPU
+            batch = dataloader[i][0].to(calibration_device) # Move current batch to primary GPU
             # Assume batch shape is (1, seqlen) for calibration samples
             inputs_embeds = embed_tokens(batch)
             # Create positional IDs dynamically based on batch seq len
             seq_len = batch.shape[1]
-            pos_ids = torch.arange(0, seq_len, dtype=torch.long, device=dev).unsqueeze(0)
+            pos_ids = torch.arange(0, seq_len, dtype=torch.long, device=calibration_device).unsqueeze(0)
             position_embeds = embed_positions(pos_ids)
             hidden_states = inputs_embeds + position_embeds
             if project_in:
                 hidden_states = project_in(hidden_states)
             initial_hidden_states_cpu.append(hidden_states.cpu()) # Store initial states on CPU
-            # Optional: Progress update and cache clearing during embedding processing
+            # Optional: Progress update
             # if (i + 1) % 10 == 0: print(f"    Processed embedding for sample {i+1}/{args.nsamples}")
 
-    # Move embedding layers back to CPU and clear references/cache
-    embed_tokens.cpu()
-    embed_positions.cpu()
-    if project_in: project_in.cpu()
-    del embed_tokens, embed_positions, project_in, batch, inputs_embeds, pos_ids, position_embeds, hidden_states
+    # Move embedding layers back to CPU (or their original device if multi-GPU)
+    # If multi-GPU, opt_multigpu moved them, keep them there for now. If single GPU, move back.
+    if not gpus: # Only move back if single GPU was used
+        embed_tokens.cpu()
+        embed_positions.cpu()
+        if project_in: project_in.cpu()
+    del batch, inputs_embeds, pos_ids, position_embeds, hidden_states # Keep embed layers on GPU if multi-gpu
     torch.cuda.empty_cache()
-    print("  Initial embeddings processed and moved to CPU.")
+    print("  Initial embeddings processed.")
     # --- End Pre-process Embeddings ---
 
 
     # --- Attach Hooks ---
-    # Hooks must be attached before the sequential forward pass that uses them
+    # Hooks need to be attached to the *original* nn.Linear layers,
+    # even if they are wrapped by MoveModule in the multi-GPU case.
     hooks = []
     hooked_layer_names = set()
+    # Iterate through modules, potentially accessing the wrapped module if multi-GPU
     for name, m in model.named_modules():
-        if isinstance(m, nn.Linear):
+        original_module = m
+        # If using multi-GPU, the target module might be inside a MoveModule
+        if gpus and isinstance(m, MoveModule):
+            original_module = m.module # Get the actual layer
+
+        if isinstance(original_module, nn.Linear):
              # Only hook layers intended for replacement (even in_features)
-             if m.in_features % 2 == 0:
+             if original_module.in_features % 2 == 0:
+                  # Use the original module's name for tracking
                   if name not in hooked_layer_names:
+                      # Attach hook to the potentially wrapped module 'm'
                       hooks.append(
                            m.register_forward_hook(
                                # Hook captures input x (inp[0]) and stores it on CPU
@@ -353,49 +384,41 @@ def opt_sequential(model, dataloader, quantizer_name, dev): # quantizer_name is 
     # --- End Attach Hooks ---
 
 
-    # --- Sequential Forward Pass for Calibration ---
-    print(f"  Running sequential forward pass for {args.nsamples} calibration samples...")
-    # Use a fixed attention mask (assuming causal LM) - needs to be created correctly
+    # --- Forward Pass for Calibration (Handles Single/Multi-GPU) ---
+    print(f"  Running forward pass for {args.nsamples} calibration samples...")
     seq_len = model.seqlen
-    # Simple attention mask (batch_size=1, seq_len) - adjust if model requires causal mask
-    attention_mask = torch.ones(1, seq_len, device=dev)
+    # Attention mask needs to be on the device where the first layer expects it (calibration_device)
+    attention_mask = torch.ones(1, seq_len, device=calibration_device)
 
-    # Main calibration loop processing samples sequentially through layers
+    # Calibration loop
     for i in range(args.nsamples):
-        hidden_states = initial_hidden_states_cpu[i] # Start with CPU hidden states for sample i
-        # Process layers sequentially for this sample
-        for layer_idx, layer in enumerate(model.model.decoder.layers):
-            layer.to(dev) # Move layer to GPU
-            hidden_states = hidden_states.to(dev) # Move input HS to GPU
-            current_attention_mask = attention_mask.to(dev) # Ensure mask is on correct device
+        # Start with hidden states from embeddings (already on CPU)
+        hidden_states = initial_hidden_states_cpu[i].to(calibration_device) # Move to primary GPU
 
-            # Forward pass for the layer
-            # The hook attached via register_forward_hook will trigger here
-            # OPT layers typically return tuple (hidden_state, present_key_value)
-            try:
-                with torch.no_grad(): # Ensure no gradients during layer forward
-                    layer_outputs = layer(hidden_states, attention_mask=current_attention_mask)
-                hidden_states = layer_outputs[0] # Get the output hidden state
-            except Exception as e:
-                 print(f"\nError during forward pass of layer {layer_idx} for sample {i}: {e}")
-                 print("Skipping rest of layers for this sample.")
-                 # Move layer back to CPU even if error occurs
-                 layer.cpu()
-                 # Clear potentially problematic hidden_states
-                 hidden_states = torch.zeros_like(hidden_states).cpu() # Placeholder on CPU
-                 torch.cuda.empty_cache()
-                 break # Break inner layer loop, go to next sample
+        # Full forward pass through the potentially distributed model
+        # The hooks attached above will capture inputs on the CPU
+        try:
+            with torch.no_grad():
+                # Pass attention mask. If multi-GPU, MoveModule handles moving it.
+                # If single GPU, it's already on calibration_device.
+                _ = model(inputs_embeds=hidden_states, attention_mask=attention_mask)
+        except Exception as e:
+            print(f"\nError during forward pass for sample {i}: {e}")
+            # Decide how to handle errors, e.g., skip sample or stop
+            pass # Continue for now
 
-            layer.cpu() # Move layer back to CPU
-            hidden_states = hidden_states.cpu() # Move output HS back to CPU
+        # No need to manually move hidden_states between devices here;
+        # model forward pass handles it (either single device or via MoveModule)
 
-            # Clear cache frequently within the layer loop if memory is extremely tight
-            # if layer_idx % 5 == 0: torch.cuda.empty_cache() # Can be aggressive
-
-        # After processing all layers for sample i
         if (i + 1) % 10 == 0:
             print(f"    Processed calibration sample {i+1}/{args.nsamples}")
-            torch.cuda.empty_cache() # Clear cache between samples
+            # Clear cache on all relevant GPUs if multi-GPU
+            if gpus:
+                for gpu_dev in gpus:
+                    with torch.cuda.device(gpu_dev):
+                        torch.cuda.empty_cache()
+            else:
+                torch.cuda.empty_cache()
 
     # Remove hooks after all samples are processed
     for h in hooks:
@@ -403,8 +426,43 @@ def opt_sequential(model, dataloader, quantizer_name, dev): # quantizer_name is 
     print("  Removed hooks.")
 
     del initial_hidden_states_cpu, hidden_states, attention_mask # Free memory
+    if gpus:
+        for gpu_dev in gpus:
+            with torch.cuda.device(gpu_dev):
+                torch.cuda.empty_cache()
+    else:
+        torch.cuda.empty_cache()
+
+    # --- Move Model back to CPU before Scale Calculation/Replacement ---
+    print("Moving model back to CPU...")
+    model.cpu()
+    # If multi-GPU, need to unwrap layers from MoveModule
+    if gpus:
+        layers = model.model.decoder.layers
+        for i in range(len(layers)):
+            if isinstance(layers[i], MoveModule):
+                layers[i] = layers[i].module # Replace wrapper with original module
+        # Also move embeddings etc explicitly back if opt_multigpu moved them
+        model.model.decoder.embed_tokens = model.model.decoder.embed_tokens.cpu()
+        model.model.decoder.embed_positions = model.model.decoder.embed_positions.cpu()
+        if hasattr(model.model.decoder, 'project_in') and model.model.decoder.project_in:
+            model.model.decoder.project_in = model.model.decoder.project_in.cpu()
+        if hasattr(model.model.decoder, 'project_out') and model.model.decoder.project_out:
+            model.model.decoder.project_out = model.model.decoder.project_out.cpu()
+        if hasattr(model.model.decoder, 'final_layer_norm') and model.model.decoder.final_layer_norm:
+            model.model.decoder.final_layer_norm = model.model.decoder.final_layer_norm.cpu()
+        if hasattr(model, 'lm_head'): # Check if lm_head exists
+             model.lm_head = model.lm_head.cpu()
+        # Clear the gpus attribute as it's no longer accurate
+        if hasattr(model, 'gpus'):
+            delattr(model, 'gpus')
+
     torch.cuda.empty_cache()
-    # --- End Sequential Forward Pass ---
+    print("Model moved to CPU.")
+    # --- End Model Consolidation ---
+
+
+    # --- Activation Calibration (Calculate Scales - On CPU) ---
 
     # Calculate activation scales
     q_max_act = 2**(LogMatVecPackedLinear.ACT_BITS - 1) - 1
@@ -440,11 +498,14 @@ def opt_sequential(model, dataloader, quantizer_name, dev): # quantizer_name is 
 
     layers_replaced_count = 0
     # Iterate through layers again for replacement (ensure layers is correct reference)
+    # Model is now entirely on CPU. Iterate through layers for replacement.
     layers = model.model.decoder.layers
     for i in range(len(layers)):
-        print(f"Processing layer {i}...")
-        layer = layers[i] # Keep on CPU
-        layer_modules = find_layers(layer)
+        print(f"Processing layer {i} for replacement...")
+        layer = layers[i] # Layer is on CPU
+        layer_modules = find_layers(layer) # Find linear layers within this decoder layer
+
+        modules_to_replace = {} # Store replacements to apply after iteration
 
         for name, lin_layer in layer_modules.items():
             if not isinstance(lin_layer, nn.Linear): continue
@@ -452,39 +513,55 @@ def opt_sequential(model, dataloader, quantizer_name, dev): # quantizer_name is 
                 print(f"  Skipping {name}: Odd in_features ({lin_layer.in_features}).")
                 continue
 
+            # Find the full name relative to the top-level model to look up act_scales
             full_name_found = None
-            for model_name, mod in model.named_modules():
-                 if mod is lin_layer:
-                      full_name_found = model_name
-                      break
+            # Construct the expected full name based on layer index and sub-layer name
+            expected_full_name = f"model.decoder.layers.{i}.{name}"
 
-            if full_name_found is None or full_name_found not in act_scales:
-                 print(f"  Warning: Activation scale not found for {name} (lookup name: {full_name_found}). Skipping.")
+            if expected_full_name not in act_scales:
+                 print(f"  Warning: Activation scale not found for {name} (lookup name: {expected_full_name}). Skipping.")
                  continue
 
-            print(f"  Replacing {name} with LogMatVecPackedLinear...")
-            lin_layer.to(dev) # Move original to GPU for quantization
+            print(f"  Preparing replacement for {name} with LogMatVecPackedLinear...")
+            # Move original layer to primary DEV for quantization configuration
+            lin_layer.to(dev)
+            # Create custom layer on primary DEV
             custom_layer = LogMatVecPackedLinear(lin_layer.in_features, lin_layer.out_features).to(dev)
+            # Configure quantization (weights, bias, scales) on DEV
             custom_layer.configure_quantization(
                 lin_layer,
-                log_quantizer,
-                act_scales[full_name_found].to(dev) # Pass scale to GPU
+                log_quantizer, # log_quantizer is on CPU, configure_quantization should handle device if needed
+                act_scales[expected_full_name].to(dev) # Pass scale to DEV
             )
-            lin_layer.cpu() # Move original back
-            custom_layer.cpu() # Move custom layer to CPU
+            # Move original layer back to CPU (it's part of the CPU model)
+            lin_layer.cpu()
+            # Move the configured custom layer to CPU before replacing
+            custom_layer.cpu()
 
-            parent_name = name.rsplit('.', 1)[0] if '.' in name else ''
+            # Store the replacement pair (sub_layer_name, custom_layer)
             sub_layer_name = name.rsplit('.', 1)[-1]
+            parent_name = name.rsplit('.', 1)[0] if '.' in name else ''
+            modules_to_replace[name] = (parent_name, sub_layer_name, custom_layer)
+
+            layers_replaced_count += 1
+            torch.cuda.empty_cache() # Clear cache after each layer config
+
+        # Apply replacements for the current decoder layer
+        for name, (parent_name, sub_layer_name, custom_layer) in modules_to_replace.items():
             if parent_name:
                  parent_module = layer.get_submodule(parent_name)
             else:
+                 # If no parent name, the module is directly under 'layer'
                  parent_module = layer
+            # Set the attribute on the parent module (which is on CPU)
             setattr(parent_module, sub_layer_name, custom_layer)
-            layers_replaced_count += 1
+            print(f"    Replaced {name} in layer {i}.")
+            # layers_replaced_count is already incremented when preparing the replacement
 
-        if i % 5 == 0: torch.cuda.empty_cache()
+        # Optional: Clear cache less frequently if layer replacement is fast
+        # if i % 5 == 0: torch.cuda.empty_cache() # Already clearing after each config
 
-    print(f"Logarithmic quantization finished. Replaced {layers_replaced_count} layers.")
+    print(f"\nLogarithmic quantization finished. Replaced {layers_replaced_count} layers.")
     model.config.use_cache = use_cache
     return {}
 # --- End LogPack4bit Sequential Logic ---
