@@ -961,7 +961,8 @@ if __name__ == '__main__':
 
 
     # --- Apply Quantization ---
-    if args.wbits < 16 and not is_rtn_mode: # Apply GPTQ or LogPack
+    # Apply GPTQ or LogPack ONLY if wbits < 16, not RTN mode, AND not loading a checkpoint
+    if args.wbits < 16 and not is_rtn_mode and not args.load:
         tick = time.time()
         if is_gptq_mode:
              print("Applying GPTQ quantization...")
