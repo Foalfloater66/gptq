@@ -339,6 +339,20 @@ def opt_sequential(model, dataloader, quantizer_name, dev): # quantizer_name is 
             hidden_states = inputs_embeds + position_embeds
             if project_in:
                 hidden_states = project_in(hidden_states)
+
+            # --- Add Check for Valid Token IDs ---
+            vocab_size = embed_tokens.weight.shape[0]
+            max_token_id = torch.max(batch).item()
+            min_token_id = torch.min(batch).item()
+            # print(f"  DEBUG Sample {i}: Batch shape={batch.shape}, Token Range=[{min_token_id}, {max_token_id}], Vocab Size={vocab_size}") # Optional detailed print
+            if max_token_id >= vocab_size or min_token_id < 0:
+                print(f"\n--- ERROR ---")
+                print(f"Sample {i}: Found invalid token ID! Range: [{min_token_id}, {max_token_id}], Vocab Size: {vocab_size}")
+                print(f"Problematic Batch (first 20 tokens): {batch[0, :20]}")
+                print(f"Ensure the tokenizer used for '{args.dataset}' matches '{args.model}'.")
+                raise ValueError(f"Invalid token ID detected in calibration data sample {i}.")
+            # --- End Check ---
+
             initial_hidden_states_cpu.append(hidden_states.cpu()) # Store initial states on CPU
             # Optional: Progress update
             # if (i + 1) % 10 == 0: print(f"    Processed embedding for sample {i+1}/{args.nsamples}")
