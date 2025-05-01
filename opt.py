@@ -291,28 +291,120 @@ def opt_sequential(model, dataloader, quantizer_name, dev): # quantizer_name is 
                       )
                       hooked_layer_names.add(name)
 
-    print(f"  Running {args.nsamples} calibration samples...")
-    model.to(dev) # Move model to GPU for calibration run
-    # Ensure embeddings are on the correct device
-    model.model.decoder.embed_tokens = model.model.decoder.embed_tokens.to(dev)
-    model.model.decoder.embed_positions = model.model.decoder.embed_positions.to(dev)
+    print(f"  Preparing for {args.nsamples} calibration samples (sequential processing)...")
+    # Keep model on CPU initially
+    model.cpu()
+    torch.cuda.empty_cache() # Clear cache before starting
+
+    # --- Pre-process Embeddings ---
+    # Move necessary embedding layers to GPU temporarily
+    embed_tokens = model.model.decoder.embed_tokens.to(dev)
+    embed_positions = model.model.decoder.embed_positions.to(dev)
+    project_in = None
     if hasattr(model.model.decoder, 'project_in') and model.model.decoder.project_in:
-        model.model.decoder.project_in = model.model.decoder.project_in.to(dev)
+        project_in = model.model.decoder.project_in.to(dev)
 
-    # Run calibration samples
-    for i in range(args.nsamples):
-         # Assuming dataloader is a list of batches
-         batch = dataloader[i][0].to(dev)
-         try:
-              _ = model(batch)
-         except Exception as e:
-              print(f"Warning: Error during calibration forward pass on sample {i}: {e}")
-              pass # Continue for now
-    for h in hooks:
-         h.remove()
+    # Store initial hidden states for each sample on CPU
+    initial_hidden_states_cpu = []
+    print("  Processing initial embeddings for calibration samples...")
+    with torch.no_grad(): # Ensure no gradients are computed
+        for i in range(args.nsamples):
+            batch = dataloader[i][0].to(dev) # Move current batch to GPU
+            # Assume batch shape is (1, seqlen) for calibration samples
+            inputs_embeds = embed_tokens(batch)
+            # Create positional IDs dynamically based on batch seq len
+            seq_len = batch.shape[1]
+            pos_ids = torch.arange(0, seq_len, dtype=torch.long, device=dev).unsqueeze(0)
+            position_embeds = embed_positions(pos_ids)
+            hidden_states = inputs_embeds + position_embeds
+            if project_in:
+                hidden_states = project_in(hidden_states)
+            initial_hidden_states_cpu.append(hidden_states.cpu()) # Store initial states on CPU
+            # Optional: Progress update and cache clearing during embedding processing
+            # if (i + 1) % 10 == 0: print(f"    Processed embedding for sample {i+1}/{args.nsamples}")
 
-    model.cpu() # Move model back to CPU after calibration
+    # Move embedding layers back to CPU and clear references/cache
+    embed_tokens.cpu()
+    embed_positions.cpu()
+    if project_in: project_in.cpu()
+    del embed_tokens, embed_positions, project_in, batch, inputs_embeds, pos_ids, position_embeds, hidden_states
     torch.cuda.empty_cache()
+    print("  Initial embeddings processed and moved to CPU.")
+    # --- End Pre-process Embeddings ---
+
+
+    # --- Attach Hooks ---
+    # Hooks must be attached before the sequential forward pass that uses them
+    hooks = []
+    hooked_layer_names = set()
+    for name, m in model.named_modules():
+        if isinstance(m, nn.Linear):
+             # Only hook layers intended for replacement (even in_features)
+             if m.in_features % 2 == 0:
+                  if name not in hooked_layer_names:
+                      hooks.append(
+                           m.register_forward_hook(
+                               # Hook captures input x (inp[0]) and stores it on CPU
+                               lambda mod, inp, outp, n=name: stat_input_hook(mod, inp, outp, n)
+                           )
+                      )
+                      hooked_layer_names.add(name)
+    print(f"  Attached {len(hooks)} hooks for activation statistics.")
+    # --- End Attach Hooks ---
+
+
+    # --- Sequential Forward Pass for Calibration ---
+    print(f"  Running sequential forward pass for {args.nsamples} calibration samples...")
+    # Use a fixed attention mask (assuming causal LM) - needs to be created correctly
+    seq_len = model.seqlen
+    # Simple attention mask (batch_size=1, seq_len) - adjust if model requires causal mask
+    attention_mask = torch.ones(1, seq_len, device=dev)
+
+    # Main calibration loop processing samples sequentially through layers
+    for i in range(args.nsamples):
+        hidden_states = initial_hidden_states_cpu[i] # Start with CPU hidden states for sample i
+        # Process layers sequentially for this sample
+        for layer_idx, layer in enumerate(model.model.decoder.layers):
+            layer.to(dev) # Move layer to GPU
+            hidden_states = hidden_states.to(dev) # Move input HS to GPU
+            current_attention_mask = attention_mask.to(dev) # Ensure mask is on correct device
+
+            # Forward pass for the layer
+            # The hook attached via register_forward_hook will trigger here
+            # OPT layers typically return tuple (hidden_state, present_key_value)
+            try:
+                with torch.no_grad(): # Ensure no gradients during layer forward
+                    layer_outputs = layer(hidden_states, attention_mask=current_attention_mask)
+                hidden_states = layer_outputs[0] # Get the output hidden state
+            except Exception as e:
+                 print(f"\nError during forward pass of layer {layer_idx} for sample {i}: {e}")
+                 print("Skipping rest of layers for this sample.")
+                 # Move layer back to CPU even if error occurs
+                 layer.cpu()
+                 # Clear potentially problematic hidden_states
+                 hidden_states = torch.zeros_like(hidden_states).cpu() # Placeholder on CPU
+                 torch.cuda.empty_cache()
+                 break # Break inner layer loop, go to next sample
+
+            layer.cpu() # Move layer back to CPU
+            hidden_states = hidden_states.cpu() # Move output HS back to CPU
+
+            # Clear cache frequently within the layer loop if memory is extremely tight
+            # if layer_idx % 5 == 0: torch.cuda.empty_cache() # Can be aggressive
+
+        # After processing all layers for sample i
+        if (i + 1) % 10 == 0:
+            print(f"    Processed calibration sample {i+1}/{args.nsamples}")
+            torch.cuda.empty_cache() # Clear cache between samples
+
+    # Remove hooks after all samples are processed
+    for h in hooks:
+        h.remove()
+    print("  Removed hooks.")
+
+    del initial_hidden_states_cpu, hidden_states, attention_mask # Free memory
+    torch.cuda.empty_cache()
+    # --- End Sequential Forward Pass ---
 
     # Calculate activation scales
     q_max_act = 2**(LogMatVecPackedLinear.ACT_BITS - 1) - 1
