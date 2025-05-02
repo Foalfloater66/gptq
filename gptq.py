@@ -131,16 +131,19 @@ class GPTQ:
                 Q1[:, i] = q
                 Losses1[:, i] = (w - q) ** 2 / d ** 2
 
+                # NOTE: Error compensation step - unclear if it works for other quantization schemes 
                 err1 = (w - q) / d
                 W1[:, i:] -= err1.unsqueeze(1).matmul(Hinv1[i, i:].unsqueeze(0))
-                Err1[:, i] = err1
+                Err1[:, i] = err1 
 
             Q[:, i1:i2] = Q1
             Losses[:, i1:i2] = Losses1 / 2
 
+            # NOTE: Re-enabling the second part of the error compensation related to Err1.
             W[:, i2:] -= Err1.matmul(Hinv[i1:i2, i2:])
 
             if DEBUG:
+                # Debug step should work again now that Err1 is back
                 self.layer.weight.data[:, :i2] = Q[:, :i2]
                 self.layer.weight.data[:, i2:] = W[:, i2:]
                 print(torch.sum((self.layer(self.inp1) - self.out1) ** 2))
