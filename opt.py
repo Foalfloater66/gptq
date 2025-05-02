@@ -437,7 +437,7 @@ if __name__ == '__main__':
         help='Whether to use static groups; recommended when using `--actorder` for more efficient inference.'
     )
     parser.add_argument(
-        '--quantizer', type=str, choices=['uniform_minmax', 'logarithm', 'quantile', 'kmeans', 'apot'], default='uniform_minmax', # Added kmeans and apot
+        '--quantizer', type=str, choices=['uniform_minmax', 'logarithm', 'quantile', 'kmeans', 'apot'], default='uniform_minmax',
         help="Which parameter quantizer to use.",
     )
 
