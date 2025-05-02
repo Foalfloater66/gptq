@@ -137,14 +137,6 @@ torch::Tensor logmatvec_forward_packed4bit(
 
     // Check for CUDA errors after kernel launch (optional but recommended for debugging)
     // cudaError_t err = cudaGetLastError();
-        blocks,
-        threads,
-        shared_mem_size,
-        stream
-    );
-
-    // Check for CUDA errors after kernel launch (optional but recommended for debugging)
-    // cudaError_t err = cudaGetLastError();
     // TORCH_CHECK(err == cudaSuccess, "CUDA kernel launch failed: ", cudaGetErrorString(err));
 
     return output;
