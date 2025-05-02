@@ -1,4 +1,5 @@
 from .quantilequantizer import QuantileQuantizer
+from .lloydmaxquant import LloydMaxQuantizer
 # Rename imported Quantizer to avoid clash if needed, or rely on specific import
 from .minmaxquant import Quantizer as MinMaxQuantizer
 from .logquantizer import LogQuantizer
@@ -12,6 +13,8 @@ def get_quantizer(quantizer_name):
     if quantizer_name == 'quantile':
         print("Using Quantile Quantizer")
         return QuantileQuantizer
+    elif quantizer_name == 'lloydmax':
+        return LloydMaxQuantizer
     elif quantizer_name == 'logarithm':
         print("Using Logarithmic Quantizer")
         return LogQuantizer
