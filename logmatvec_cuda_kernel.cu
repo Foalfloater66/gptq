@@ -57,6 +57,7 @@ __device__ inline void unpack_4bit_codes(const int8_t packed_byte, uint8_t& code
 
 #include <cuda_fp16.h> // For __half
 #include <cmath>       // For roundf
+#include <type_traits> // For std::is_same
 
 // Kernel for Log-Quantized Matrix (W) x Linear-Quantized Vector (a)
 // Uses bundled packed 4-bit codes (1 sign + 3 exponent)
@@ -111,8 +112,17 @@ __global__ void LogMatVecKernelPacked4bit(
 
         // Quantize activations on-the-fly
         // Convert half to float for quantization math if necessary
-        float activation1_float = static_cast<float>(activation1_orig);
-        float activation2_float = static_cast<float>(activation2_orig);
+        float activation1_float;
+        float activation2_float;
+        if constexpr (std::is_same<T_ACT, __half>::value) {
+            // Use CUDA intrinsic to convert half to float
+            activation1_float = __half2float(activation1_orig);
+            activation2_float = __half2float(activation2_orig);
+        } else {
+            // If T_ACT is already float, just assign
+            activation1_float = activation1_orig;
+            activation2_float = activation2_orig;
+        }
 
         // Perform quantization: round(val / scale) and clamp
         int activation1_int = static_cast<int>(roundf(activation1_float / act_scale));
