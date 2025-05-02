@@ -6,10 +6,9 @@ DATASET="wikitext2"       # Calibration dataset
 WBITS=4                   # Bit width for quantization (adjust as needed)
 NSAMPLES=128              # Number of calibration samples
 OUTPUT_FILE="opt125m_w${WBITS}_eval_results.jsonl" # Output file for results
-USE_NEW_EVAL="--new-eval" # Add '--new-eval' flag if needed, otherwise set to ""
 # Add other common flags like --groupsize, --sym, --act-order etc. here
 # Example: COMMON_FLAGS="--groupsize 128 --act-order --static-groups"
-COMMON_FLAGS=""
+COMMON_FLAGS="--groupsize 1024"
 
 # List of quantizers to test (match choices in opt.py)
 QUANTIZERS=("uniform_minmax" "apot" "lloydmax" "logarithm") # Add others: "quantile", "kmeans"
@@ -48,7 +47,6 @@ for QUANTIZER in "${QUANTIZERS[@]}"; do
     --quantizer \"$QUANTIZER\" \
     --output-file \"$OUTPUT_FILE\" \
     --quiet \
-    $USE_NEW_EVAL \
     $COMMON_FLAGS"
     # Add any other specific flags if needed, escaping appropriately
 
