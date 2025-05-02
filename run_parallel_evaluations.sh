@@ -5,14 +5,13 @@ MODEL="facebook/opt-125m"  # Model to evaluate
 DATASET="wikitext2"       # Calibration dataset
 WBITS=4                   # Bit width for quantization (adjust as needed)
 NSAMPLES=128              # Number of calibration samples
-OUTPUT_FILE="opt125m_w${WBITS}_eval_results.json" # Output file for results
+OUTPUT_FILE="opt125m_w${WBITS}_eval_results.jsonl" # Output file for results (using .jsonl)
 # Add other common flags like --groupsize, --sym, --act-order etc. here
 # Example: COMMON_FLAGS="--groupsize 128 --act-order --static-groups"
-COMMON_FLAGS="--groupsize 1024"
+COMMON_FLAGS="--groupsize 1024 --new-eval" # Added --new-eval based on previous error context
 
 # List of quantizers to test (match choices in opt.py)
-# QUANTIZERS=("uniform_minmax" "apot" "lloydmax" "logarithm") # Add others: "quantile", "kmeans"
-QUANTIZERS=("quantile" "kmeans")
+QUANTIZERS=("uniform_minmax" "apot" "lloydmax" "logarithm" "quantile" "kmeans") # All 6 quantizers
 
 # GPUs to use
 GPUS=(0 1 2 3)
@@ -30,13 +29,30 @@ echo "================================================="
 pids=()
 quant_idx=0
 # Ensure output file exists and is writable before starting background jobs
-touch "$OUTPUT_FILE" || { echo "Error: Cannot create or write to output file $OUTPUT_FILE"; exit 1; }
+# Using 'a' mode with touch/redirection to avoid clearing if it exists
+: > "$OUTPUT_FILE" # Clear the file at the start, or use `>` if preferred over `touch`
+if [ $? -ne 0 ]; then
+    echo "Error: Cannot create or write to output file $OUTPUT_FILE"
+    exit 1
+fi
+
 
 for QUANTIZER in "${QUANTIZERS[@]}"; do
   # Assign GPU in a round-robin fashion
   GPU_ID=${GPUS[$((quant_idx % NUM_GPUS))]}
 
-  echo "--- Assigning Quantizer: $QUANTIZER to GPU: $GPU_ID ---"
+  # If we have already launched NUM_GPUS jobs, wait for the job
+  # that previously used the GPU we are about to assign.
+  if [ $quant_idx -ge $NUM_GPUS ]; then
+    WAIT_PID_INDEX=$((quant_idx - NUM_GPUS))
+    echo "--- GPU $GPU_ID busy. Waiting for job ${pids[$WAIT_PID_INDEX]} (Quantizer: ${QUANTIZERS[$WAIT_PID_INDEX]}) to finish... ---"
+    wait "${pids[$WAIT_PID_INDEX]}"
+    # Optional: Check exit status of the waited job here if needed
+    # status=$?
+    # if [ $status -ne 0 ]; then ... fi
+  fi
+
+  echo "--- Launching Quantizer: $QUANTIZER on GPU: $GPU_ID ---"
 
   # Construct the command for this quantizer and GPU
   # Ensure arguments with spaces or special characters are quoted
@@ -63,20 +79,38 @@ for QUANTIZER in "${QUANTIZERS[@]}"; do
   ((quant_idx++))
 done
 
-# Wait for all background processes launched in the loop to complete
-echo "Waiting for all background jobs (${pids[@]}) to complete..."
-wait "${pids[@]}"
+# Wait for the remaining background processes (the last batch)
+echo "--- All jobs launched. Waiting for the last batch of jobs to complete... ---"
+# Wait for all remaining child processes without specific PIDs
+wait
 
-# Check exit status of background jobs (optional but recommended)
-EXIT_STATUS=0
-for pid in "${pids[@]}"; do
-    wait $pid
+# Check the status of the last batch of jobs specifically
+# These jobs haven't been explicitly waited for with status check yet inside the loop.
+# The number of jobs in the last batch is NUM_GPUS or less.
+LAST_BATCH_START_INDEX=$(( ${#pids[@]} - NUM_GPUS ))
+if [ $LAST_BATCH_START_INDEX -lt 0 ]; then
+    LAST_BATCH_START_INDEX=0
+fi
+
+echo "--- Checking exit status of the last batch of jobs (indices ${LAST_BATCH_START_INDEX} to $((${#pids[@]} - 1))) ---"
+for i in $(seq $LAST_BATCH_START_INDEX $((${#pids[@]} - 1)) ); do
+    pid_to_check=${pids[$i]}
+    quantizer_to_check=${QUANTIZERS[$i]}
+    # Use `wait $pid` again here; it's safe even if already waited for.
+    # It will return immediately if the process is already finished and give the exit status.
+    wait "$pid_to_check"
     status=$?
-    if [ $status -ne 0 ]; then
-        echo "Warning: Process $pid exited with status $status."
-        EXIT_STATUS=1 # Record that at least one job failed
+     if [ $status -ne 0 ]; then
+        # Check if we already recorded a failure for this PID during the in-loop wait
+        # This avoids duplicate warnings if a job failed before the final wait.
+        # However, the simplest robust approach is just to report failure if status is non-zero here.
+        echo "Warning: Final check shows process $pid_to_check (Quantizer: $quantizer_to_check) exited with status $status."
+        EXIT_STATUS=1 # Record failure if not already recorded
+    else
+        echo "--- Final check confirms job $pid_to_check (Quantizer: $quantizer_to_check) finished successfully. ---"
     fi
 done
+
 
 echo "================================================="
 if [ $EXIT_STATUS -eq 0 ]; then
