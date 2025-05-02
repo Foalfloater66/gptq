@@ -11,7 +11,8 @@ OUTPUT_FILE="opt125m_w${WBITS}_eval_results.json" # Output file for results
 COMMON_FLAGS="--groupsize 1024"
 
 # List of quantizers to test (match choices in opt.py)
-QUANTIZERS=("uniform_minmax" "apot" "lloydmax" "logarithm") # Add others: "quantile", "kmeans"
+# QUANTIZERS=("uniform_minmax" "apot" "lloydmax" "logarithm") # Add others: "quantile", "kmeans"
+QUANTIZERS=("quantile" "kmeans")
 
 # GPUs to use
 GPUS=(0 1 2 3)
