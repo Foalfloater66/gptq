@@ -1,14 +1,14 @@
 #!/bin/bash
 
 # --- Configuration ---
-MODEL="facebook/opt-125m"  # Model to evaluate
+MODEL="facebook/opt-350m"  # Model to evaluate
 DATASET="wikitext2"       # Calibration dataset
 WBITS=4                   # Bit width for quantization (adjust as needed)
 NSAMPLES=128              # Number of calibration samples
-OUTPUT_FILE="opt125m_w${WBITS}_eval_results.jsonl" # Output file for results (using .jsonl)
+OUTPUT_FILE="opt350m_w${WBITS}_eval_results.json" # Output file for results (using .jsonl)
 # Add other common flags like --groupsize, --sym, --act-order etc. here
 # Example: COMMON_FLAGS="--groupsize 128 --act-order --static-groups"
-COMMON_FLAGS="--groupsize 1024 --new-eval" # Added --new-eval based on previous error context
+COMMON_FLAGS="--groupsize 1024"  # Added --new-eval based on previous error context
 
 # List of quantizers to test (match choices in opt.py)
 QUANTIZERS=("uniform_minmax" "apot" "lloydmax" "logarithm" "quantile" "kmeans") # All 6 quantizers
