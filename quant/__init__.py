@@ -3,6 +3,7 @@ from .quantilequantizer import QuantileQuantizer
 from .minmaxquant import Quantizer as MinMaxQuantizer
 from .logquantizer import LogQuantizer
 from .kmeansquantizer import KMeansQuantizer # <-- Import added
+from .apotquantizer import APoTQuantizer # <-- Import added
 # Keep the standalone affine quantize function if needed elsewhere
 from .minmaxquant import quantize as affine_quantize
 
@@ -20,6 +21,9 @@ def get_quantizer(quantizer_name):
     elif quantizer_name == 'kmeans':
         print("Using K-Means Quantizer")
         return KMeansQuantizer
+    elif quantizer_name == 'apot':
+        print("Using APoT Quantizer (k=2, PTQ variant)")
+        return APoTQuantizer
     else:
         # Fallback or error for unknown quantizer
         print(f"Warning: Unknown quantizer '{quantizer_name}', falling back to Uniform MinMax.")
