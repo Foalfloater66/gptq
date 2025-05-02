@@ -1,4 +1,6 @@
 import time
+import json # <-- Add import
+import os   # <-- Add import
 
 import torch
 import torch.nn as nn
@@ -227,9 +229,11 @@ def opt_eval(model, testenc, dev):
         neg_log_likelihood = loss.float() * model.seqlen
         nlls.append(neg_log_likelihood)
     ppl = torch.exp(torch.stack(nlls).sum() / (nsamples * model.seqlen))
-    print(ppl.item())
+    # print(ppl.item()) # Keep commented out or remove entirely
 
     model.config.use_cache = use_cache
+
+    return ppl.item() # Return the perplexity
 
 # TODO: perform packing on GPU
 def opt_pack3(model, quantizers):
@@ -440,10 +444,32 @@ if __name__ == '__main__':
         '--quantizer', type=str, choices=['uniform_minmax', 'logarithm', 'quantile', 'kmeans', 'apot', 'lloydmax'], default='uniform_minmax',
         help="Which parameter quantizer to use.",
     )
-
-    # NOTE: add the quantizer here.
+    parser.add_argument(
+        '--output-file', type=str, default=None,
+        help='Path to save evaluation results (JSON Lines format).'
+    )
+    parser.add_argument(
+        '--quiet', action='store_true',
+        help='Reduce verbose logging during quantization and evaluation.'
+    )
 
     args = parser.parse_args()
+
+    # Define DEV globally or pass args around if needed
+    DEV = torch.device('cuda:0') # Assumes CUDA_VISIBLE_DEVICES handles mapping
+
+    # Add conditional printing based on --quiet flag
+    def log_print(*print_args, **kwargs):
+        if not args.quiet:
+            print(*print_args, **kwargs)
+
+    # --- Replace print calls with log_print ---
+    # Note: You'll need to manually update prints within opt_sequential and opt_eval
+    # if you want them silenced by --quiet. For brevity, only key examples shown here.
+    # Example: Replace print('Starting ...') with log_print('Starting ...') in opt_sequential/opt_eval
+    # Example: Replace print(i, name) with log_print(i, name) in opt_sequential
+    # Example: Replace print('Quantizing ...') with log_print('Quantizing ...') in opt_sequential
+    # Example: Replace print(i) with log_print(i) in opt_eval
 
     if args.load:
         model = load_quant3(args.model, args.load)
@@ -455,10 +481,12 @@ if __name__ == '__main__':
         args.dataset, nsamples=args.nsamples, seed=args.seed, model=args.model, seqlen=model.seqlen
     )
 
+    quantizers = None # Initialize quantizers
     if args.wbits < 16 and not args.nearest:
         tick = time.time()
+        # Pass log_print or args if needed inside opt_sequential
         quantizers = opt_sequential(model, dataloader, args.quantizer, DEV)
-        print(time.time() - tick)
+        log_print(f"Quantization time: {time.time() - tick:.2f}s")
 
     if args.benchmark:
         gpus = [torch.device('cuda:%d' % i) for i in range(torch.cuda.device_count())]
@@ -472,16 +500,45 @@ if __name__ == '__main__':
     if args.load:
         exit()
 
-    datasets = ['wikitext2', 'ptb', 'c4'] 
+    # Evaluation Loop
+    evaluation_results = {}
+    datasets = ['wikitext2', 'ptb', 'c4']
     if args.new_eval:
       datasets = ['wikitext2', 'ptb-new', 'c4-new']
-    for dataset in datasets: 
+    for dataset in datasets:
         dataloader, testloader = get_loaders(
             dataset, seed=args.seed, model=args.model, seqlen=model.seqlen
         )
-        print(dataset)
-        opt_eval(model, testloader, DEV)
+        print(f"Evaluating on: {dataset}") # Keep this print for clarity
+        # Pass log_print or args if needed inside opt_eval
+        ppl = opt_eval(model, testloader, DEV)
+        print(f"Perplexity: {ppl:.4f}") # Keep this print for immediate feedback
+        evaluation_results[dataset] = ppl
 
-    if args.save:
+    # Save results if output file specified
+    if args.output_file:
+        output_data = {
+            'model': args.model,
+            'quantizer': args.quantizer,
+            'wbits': args.wbits,
+            'groupsize': args.groupsize,
+            'sym': args.sym,
+            'percdamp': args.percdamp,
+            'act_order': args.act_order,
+            'static_groups': args.static_groups,
+            'trits': args.trits,
+            'results': evaluation_results
+        }
+        # Append results as a new line in JSON Lines format
+        mode = 'a' if os.path.exists(args.output_file) else 'w'
+        try:
+            with open(args.output_file, mode) as f:
+                f.write(json.dumps(output_data) + '\n')
+            print(f"Results appended to {args.output_file}")
+        except IOError as e:
+            print(f"Error writing to output file {args.output_file}: {e}")
+
+
+    if args.save and quantizers is not None: # Ensure quantizers exist before packing
         opt_pack3(model, quantizers)
-        torch.save(model.state_dict(), args.save) 
+        torch.save(model.state_dict(), args.save)
