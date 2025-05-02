@@ -55,17 +55,27 @@ __device__ inline void unpack_4bit_codes(const int8_t packed_byte, uint8_t& code
     code2 = unsigned_byte & 0x0F;        // Low nibble (second weight code)
 }
 
+#include <cuda_fp16.h> // For __half
+#include <cmath>       // For roundf
+
 // Kernel for Log-Quantized Matrix (W) x Linear-Quantized Vector (a)
 // Uses bundled packed 4-bit codes (1 sign + 3 exponent)
+// Performs activation quantization and bias addition internally
+template<typename T_ACT> // Template for activation type (float or half)
 __global__ void LogMatVecKernelPacked4bit(
-    const int* __restrict__ a_quant,          // Quantized activations [InFeatures]
+    const T_ACT* __restrict__ x,              // Activations (float or half) [InFeatures]
     const int8_t* __restrict__ w_packed_4bit, // Packed 4-bit codes [OutFeatures * InFeatures/2]
+    const float* __restrict__ bias,           // Bias vector [OutFeatures]
     float* __restrict__ output,               // Output vector [OutFeatures]
-    const float delta_lsb,                   // Activation scaling factor
-    const int min_exp,                       // Minimum exponent value for unmapping (maps to exp_map=0)
+    const float act_scale,                   // Activation scaling factor (delta_lsb)
+    const int min_exp,                       // Minimum exponent value for weights
+    const int act_bits,                      // Activation bits
     const int in_features,
     const int out_features
 ) {
+    // Calculate activation quantization bounds
+    const int q_max_act = (1 << (act_bits - 1)) - 1; // 2**(act_bits - 1) - 1
+    const int q_min_act = -(1 << (act_bits - 1));    // -2**(act_bits - 1)
     // Each block computes one output feature
     const int output_row = blockIdx.x;
 
@@ -95,9 +105,21 @@ __global__ void LogMatVecKernelPacked4bit(
         uint8_t code1, code2;
         unpack_4bit_codes(packed_byte, code1, code2);
 
-        // Read corresponding activations
-        int activation1 = a_quant[base_idx];
-        int activation2 = a_quant[base_idx + 1];
+        // Read corresponding float/half activations
+        T_ACT activation1_orig = x[base_idx];
+        T_ACT activation2_orig = x[base_idx + 1];
+
+        // Quantize activations on-the-fly
+        // Convert half to float for quantization math if necessary
+        float activation1_float = static_cast<float>(activation1_orig);
+        float activation2_float = static_cast<float>(activation2_orig);
+
+        // Perform quantization: round(val / scale) and clamp
+        int activation1_int = static_cast<int>(roundf(activation1_float / act_scale));
+        activation1_int = max(q_min_act, min(q_max_act, activation1_int)); // Clamp
+
+        int activation2_int = static_cast<int>(roundf(activation2_float / act_scale));
+        activation2_int = max(q_min_act, min(q_max_act, activation2_int)); // Clamp
 
         // --- Process first weight (code1) ---
         if (code1 != 0) { // Check for special zero code
@@ -113,7 +135,8 @@ __global__ void LogMatVecKernelPacked4bit(
             } else { // Negative (codes 8-15 map to exp_map 0-7)
                  exponent1 = static_cast<int>(exp_map1) + min_exp; // Map 0->min_exp, 7->max_exp
             }
-            accumulate_bitshift(activation1, exponent1, sign1, &accumulator);
+            // Use quantized integer activation
+            accumulate_bitshift(activation1_int, exponent1, sign1, &accumulator);
         }
 
         // --- Process second weight (code2) ---
@@ -128,7 +151,8 @@ __global__ void LogMatVecKernelPacked4bit(
             } else {
                  exponent2 = static_cast<int>(exp_map2) + min_exp;
             }
-            accumulate_bitshift(activation2, exponent2, sign2, &accumulator);
+            // Use quantized integer activation
+            accumulate_bitshift(activation2_int, exponent2, sign2, &accumulator);
         }
     }
 
@@ -147,10 +171,11 @@ __global__ void LogMatVecKernelPacked4bit(
         __syncthreads(); // Synchronize after each reduction step
     }
 
-    // Lead thread (threadIdx.x == 0) writes the final scaled result
+    // Lead thread (threadIdx.x == 0) writes the final scaled result including bias
     if (threadIdx.x == 0) {
-        // Cast the final 64-bit integer result to float before scaling
-        output[output_row] = static_cast<float>(sdata[0]) * delta_lsb;
+        // Cast the final 64-bit integer result to float, scale by activation LSB, and add bias
+        // Bias is assumed to be float from the C++ wrapper
+        output[output_row] = static_cast<float>(sdata[0]) * act_scale + bias[output_row];
     }
 }
 
@@ -158,31 +183,41 @@ __global__ void LogMatVecKernelPacked4bit(
 // --- Kernel Launcher ---
 // This function is defined in the .cu file and called by the .cpp file.
 // It sets up the <<<...>>> kernel launch syntax.
+// Templated for activation type.
+template<typename T_ACT>
 void LogMatVecKernelLauncher(
-    const int* a_quant,
-    const int8_t* w_packed_4bit, // Changed parameter name
-    float* output,
-    const float delta_lsb,
-    const int min_exp,
+    const T_ACT* x,               // Activations (float or half)
+    const int8_t* w_packed_4bit,  // Packed weights
+    const float* bias,            // Bias tensor (float)
+    float* output,                // Output tensor (float32)
+    const float act_scale,        // Activation scale (delta_lsb)
+    const int min_exp,            // Weight min exponent
+    const int act_bits,           // Activation bits
     const int in_features,
     const int out_features,
     const dim3 blocks,
     const dim3 threads,
     const size_t shared_mem_size,
-    // const int min_exp, // Remove from the end
     cudaStream_t stream)
 {
-    // Launch the __global__ kernel for packed 4-bit codes
-    LogMatVecKernelPacked4bit<<<blocks, threads, shared_mem_size, stream>>>(
-        a_quant,
-        w_packed_4bit, // Pass packed codes
+    // Launch the __global__ kernel (templated)
+    LogMatVecKernelPacked4bit<T_ACT><<<blocks, threads, shared_mem_size, stream>>>(
+        x,
+        w_packed_4bit,
+        bias,
         output,
-        delta_lsb,
-        min_exp,       // Pass min_exp for unmapping
+        act_scale,
+        min_exp,
+        act_bits,
         in_features,
         out_features
     );
 }
+
+// Explicit template instantiations (needed if definition is not in header)
+// Instantiate for float and half activation types
+template void LogMatVecKernelLauncher<float>(const float*, const int8_t*, const float*, float*, const float, const int, const int, const int, const int, const dim3, const dim3, const size_t, cudaStream_t);
+template void LogMatVecKernelLauncher<__half>(const __half*, const int8_t*, const float*, float*, const float, const int, const int, const int, const int, const dim3, const dim3, const size_t, cudaStream_t);
 
 
 // ============================================================================

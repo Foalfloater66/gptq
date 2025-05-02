@@ -75,48 +75,34 @@ class LogMatVecPackedLinear(nn.Module):
         if x.ndim > 2:
             x = x.reshape(-1, x.shape[-1])
 
-        # --- Activation Quantization (Calibrated) ---
-        q_max_act = 2**(self.ACT_BITS - 1) - 1
-        q_min_act = -2**(self.ACT_BITS - 1)
-        # Use the pre-calculated scale stored in the buffer
-        # Need to handle potential shape mismatch if scale is per-token/channel (not implemented here)
-        delta_lsb = self.activation_scale
-        # Quantize and clamp activations
-        a_quant = torch.round(x / delta_lsb).clamp(q_min_act, q_max_act).to(torch.int32)
-        # --- End Activation Quantization ---
+        # --- Activation Quantization moved to CUDA kernel ---
+        # --- Bias Addition moved to CUDA kernel ---
 
-        # Prepare output tensor - Match the expected model dtype (likely half)
+        # Prepare output tensor - Kernel will output Float32
         output_shape = (*x.shape[:-1], self.out_features)
-        # Determine dtype from input or a layer parameter if possible, default to half
-        output_dtype = x.dtype # Assume output should match input dtype
-        output = torch.empty(output_shape, dtype=output_dtype, device=x.device)
-
-        # Kernel outputs float32, so we need a temporary float32 buffer
+        # Kernel internally calculates and outputs float32
         output_float32 = torch.empty(output_shape, dtype=torch.float32, device=x.device)
 
-        # Iterate over batch dimension (kernel expects 1D activation vector)
         # TODO: Optimize this loop - ideally use a batch-aware kernel
+        # Current kernel processes one activation vector at a time.
         for i in range(x.shape[0]):
-            a_quant_single = a_quant[i].contiguous()
-            # Use the single scalar scale for the whole layer
-            delta_lsb_single = delta_lsb.item()
-            # Write kernel output to the temporary float32 buffer slice
-            output_single_float32 = output_float32[i]
+            x_single = x[i].contiguous() # Pass float/half activation
+            output_single = output_float32[i] # Slice for kernel output
 
             # Explicitly set device context before kernel launch
-            with torch.cuda.device(self.packed_weights.device): # Use packed_weights device
+            with torch.cuda.device(self.packed_weights.device):
                 logmatvec_cuda.forward_packed4bit( # Call updated kernel signature
-                    a_quant_single,
-                    self.packed_weights, # Pass packed 4-bit codes
-                    output_single_float32, # Write to float32 buffer slice
-                    delta_lsb_single,
-                    self.min_exp.item()
+                    x_single,                   # Pass original activations (float/half)
+                    self.packed_weights,        # Pass packed 4-bit codes
+                    self.bias,                  # Pass bias tensor
+                    output_single,              # Write to float32 buffer slice
+                    self.activation_scale.item(), # Pass activation scale
+                    self.min_exp.item(),        # Pass min exponent for weights
+                    self.ACT_BITS               # Pass activation bits
                 )
 
-        # Add bias (ensure bias is correct dtype before adding)
-        # Cast kernel output back to target dtype before adding bias
-        output = output_float32.to(output_dtype)
-        output += self.bias.to(output_dtype) # Ensure bias matches output dtype
+        # Cast final kernel output (which includes bias) back to target dtype
+        output = output_float32.to(x.dtype) # Match input dtype
 
         # Reshape output to original shape (if needed)
         if len(original_shape) > 2:
