@@ -1,16 +1,16 @@
 #!/bin/bash
 
 # --- Configuration ---
-MODEL="facebook/opt-1.3b"  # Model to evaluate
+MODEL="bigscience/bloom-560m"  # Model to evaluate (e.g., BLOOM 560m)
 DATASET="wikitext2"       # Calibration dataset
 WBITS=4                   # Bit width for quantization (adjust as needed)
 NSAMPLES=128              # Number of calibration samples
-OUTPUT_FILE="opt1_3b_w${WBITS}_eval_results.json" # Output file for results (using .jsonl)
-# Add other common flags like --groupsize, --sym, --act-order etc. here
-# Example: COMMON_FLAGS="--groupsize 128 --act-order --static-groups"
-COMMON_FLAGS="--groupsize 1024"  # Added --new-eval based on previous error context
+OUTPUT_FILE="bloom560m_w${WBITS}_eval_results.jsonl" # Output file for results (using .jsonl)
+# Common flags for bloom.py (adjust as needed)
+# Note: BLOOM uses --percdamp, --groupsize, --sym. Add --new-eval if desired.
+COMMON_FLAGS="--groupsize 128 --percdamp 0.01 --new-eval" # Example flags
 
-# List of quantizers to test (match choices in opt.py)
+# List of quantizers to test (match choices in bloom.py)
 QUANTIZERS=("uniform_minmax" "apot" "lloydmax" "logarithm" "quantile" "kmeans") # All 6 quantizers
 
 # GPUs to use
@@ -56,7 +56,7 @@ for QUANTIZER in "${QUANTIZERS[@]}"; do
 
   # Construct the command for this quantizer and GPU
   # Ensure arguments with spaces or special characters are quoted
-  CMD="CUDA_VISIBLE_DEVICES=$GPU_ID python opt.py \
+  CMD="CUDA_VISIBLE_DEVICES=$GPU_ID python bloom.py \
     \"$MODEL\" \
     \"$DATASET\" \
     --wbits $WBITS \
