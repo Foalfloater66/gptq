@@ -8,7 +8,8 @@ import math # Add math import
 
 from gptq import *
 from modelutils import *
-from quant import get_quantizer, Quantizer, Quant3Linear, make_quant3 # Import Quant3Linear
+# Import MinMaxQuantizer specifically, and other needed components
+from quant import get_quantizer, MinMaxQuantizer, Quant3Linear, make_quant3
 from quant.quant4linear import Quant4Linear, make_quant4 # Import 4-bit layer
 
 # Import CUDA modules
@@ -205,7 +206,8 @@ def opt_eval(model, testenc, dev):
         if args.nearest:
             subset = find_layers(layer)
             for name in subset:
-                quantizer = Quantizer()
+                # Use the imported MinMaxQuantizer
+                quantizer = MinMaxQuantizer()
                 quantizer.configure(
                     args.wbits, perchannel=True, sym=args.sym, mse=False
                 )
