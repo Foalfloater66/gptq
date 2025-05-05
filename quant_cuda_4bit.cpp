@@ -142,5 +142,6 @@ void vecquant4matmul_faster(
 // Define the Python module
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("vecquant4matmul", &vecquant4matmul, "Vector 4-bit Quantized Matrix Multiplication (CUDA)");
-  m.def("vecquant4matmul_faster", &vecquant4matmul_faster, "Vector 4-bit Quantized Matrix Multiplication (CUDA), faster version for FP16 input");
+  // Temporarily comment out the faster version to isolate the undefined symbol error
+  // m.def("vecquant4matmul_faster", &vecquant4matmul_faster, "Vector 4-bit Quantized Matrix Multiplication (CUDA), faster version for FP16 input");
 }
