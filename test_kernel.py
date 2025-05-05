@@ -130,7 +130,12 @@ if _quant_cuda_4bit_available:
          vec_f32_4b = vec_f32
 
     packed_height_4bit = M_BENCH_4BIT // 8
-    mat_int4_packed = torch.randint(0, 2**32 - 1, (packed_height_4bit, N_BENCH), device=DEV, dtype=torch.int32) # Use int32
+    # Generate random signed int32 values within the valid range
+    # Max value for int32 is 2**31 - 1. randint high is exclusive, so use 2**31.
+    # Min value is -(2**31).
+    min_int32 = -(2**31)
+    max_int32_exclusive = 2**31
+    mat_int4_packed = torch.randint(min_int32, max_int32_exclusive, (packed_height_4bit, N_BENCH), device=DEV, dtype=torch.int32)
     scales_4bit = torch.randn(N_BENCH, device=DEV, dtype=DTYPE_FLOAT)
     # Kernel expects zero_point * scale
     zeros_4bit = torch.randn(N_BENCH, device=DEV, dtype=DTYPE_FLOAT) # Represents zero_point * scale
