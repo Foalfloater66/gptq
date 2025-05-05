@@ -17,7 +17,7 @@ __global__ void VecQuant4MatMulKernel_float(
 );
 
 __global__ void VecQuant4MatMulKernel_half(
-    const   half* __restrict__ vec,
+    const c10::Half* __restrict__ vec, // Use c10::Half
     const    int* __restrict__ mat,
            float* __restrict__ mul, // Output is still float due to float accumulation
     const   half* __restrict__ scales,
@@ -47,35 +47,21 @@ __device__ inline unsigned int as_unsigned(int i) {
   return *reinterpret_cast<unsigned int*>(&i);
 }
 
-// --- CUDA Function Implementations ---
+// --- CUDA Kernel Launchers (accept raw pointers) ---
 
-void vecquant4matmul_cuda(
-  torch::Tensor vec,
-  torch::Tensor mat,
-  torch::Tensor mul,
-  torch::Tensor scales,
-  torch::Tensor zeros
+// Launcher for the standard kernel
+void vecquant4matmul_launcher(
+    const void* vec_ptr,      // Use void* for generic pointer
+    const int* mat_ptr,
+    float* mul_ptr,           // Output is always float
+    const void* scales_ptr,   // Use void*
+    const void* zeros_ptr,    // Use void*
+    c10::ScalarType vec_type, // Pass input data type
+    int height,
+    int width,
+    cudaStream_t stream
 ) {
-  int height = mat.size(0); // Packed height (orig_height / 8)
-  int width = mat.size(1);  // Output features
-
-  // Basic dimension checks - more robust checks could be added
-  TORCH_CHECK(vec.dim() >= 1, "vec must have at least 1 dimension");
-  TORCH_CHECK(mat.dim() == 2, "mat must be 2-dimensional");
-  TORCH_CHECK(mul.dim() >= 1, "mul must have at least 1 dimension");
-  TORCH_CHECK(scales.dim() >= 1, "scales must have at least 1 dimension");
-  TORCH_CHECK(zeros.dim() >= 1, "zeros must have at least 1 dimension");
-
-  // Check feature dimension consistency
-  int vec_features = vec.size(-1); // Last dimension of vec is input features
-  int expected_packed_height = (vec_features + 7) / 8; // ceil(vec_features / 8)
-  TORCH_CHECK(height == expected_packed_height, "Packed matrix height (mat.size(0)) does not match expected packed height based on vec features");
-  TORCH_CHECK(width == mul.size(-1), "Matrix width (mat.size(1)) must match output features (mul.size(-1))");
-  TORCH_CHECK(width == scales.size(-1), "Matrix width (mat.size(1)) must match scales features (scales.size(-1))");
-  TORCH_CHECK(width == zeros.size(-1), "Matrix width (mat.size(1)) must match zeros features (zeros.size(-1))");
-
-
-  // Grid dimensions
+  // Grid dimensions (calculated from height/width passed in)
   dim3 blocks(
     (height + BLOCKHEIGHT_4BIT - 1) / BLOCKHEIGHT_4BIT, // Number of blocks in Y dimension (for rows)
     (width + BLOCKWIDTH_4BIT - 1) / BLOCKWIDTH_4BIT    // Number of blocks in X dimension (for columns)
@@ -83,74 +69,46 @@ void vecquant4matmul_cuda(
   // Block dimensions
   dim3 threads(BLOCKWIDTH_4BIT); // Threads per block
 
-  // Dispatch based on input type, but output `mul` must be float.
-  TORCH_CHECK(mul.scalar_type() == torch::kFloat32, "mul tensor must be Float32 for vecquant4matmul_cuda");
-
-  // Explicitly call float or half kernel based on input type
-  if (vec.scalar_type() == torch::kFloat32) {
-      // Ensure scales/zeros are also float
-      auto scales_f32 = scales.to(torch::kFloat32);
-      auto zeros_f32 = zeros.to(torch::kFloat32);
-      VecQuant4MatMulKernel_float<<<blocks, threads>>>(
-          vec.data_ptr<float>(),
-          mat.data_ptr<int>(),
-          mul.data_ptr<float>(),
-          scales_f32.data_ptr<float>(),
-          zeros_f32.data_ptr<float>(),
+  // Explicitly call float or half kernel based on vec_type passed in
+  if (vec_type == torch::kFloat32) {
+      VecQuant4MatMulKernel_float<<<blocks, threads, 0, stream>>>( // Use stream
+          static_cast<const float*>(vec_ptr), // Cast void*
+          mat_ptr,
+          mul_ptr,
+          static_cast<const float*>(scales_ptr), // Cast void*
+          static_cast<const float*>(zeros_ptr),  // Cast void*
           height, width
       );
-  } else if (vec.scalar_type() == torch::kFloat16) {
-      // Ensure scales/zeros are also half
-      auto scales_f16 = scales.to(torch::kFloat16);
-      auto zeros_f16 = zeros.to(torch::kFloat16);
-      VecQuant4MatMulKernel_half<<<blocks, threads>>>(
-          vec.data_ptr<half>(),
-          mat.data_ptr<int>(),
-          mul.data_ptr<float>(), // Output is still float
-          scales_f16.data_ptr<half>(),
-          zeros_f16.data_ptr<half>(),
+  } else if (vec_type == torch::kFloat16) {
+      VecQuant4MatMulKernel_half<<<blocks, threads, 0, stream>>>( // Use stream
+          static_cast<const c10::Half*>(vec_ptr), // Cast void* to c10::Half*
+          mat_ptr,
+          mul_ptr, // Output is still float
+          static_cast<const half*>(scales_ptr), // Cast void*
+          static_cast<const half*>(zeros_ptr),  // Cast void*
           height, width
       );
   } else {
-      TORCH_CHECK(false, "vecquant4matmul_cuda supports only Float32 or Float16 input types");
+      // This case should ideally not be reached due to checks in C++ wrapper
+      // If needed, add specific error handling or default behavior
   }
 
   C10_CUDA_KERNEL_LAUNCH_CHECK(); // Check for kernel launch errors
 }
 
-void vecquant4matmul_faster_cuda(
-  torch::Tensor vec, // FP16
-  torch::Tensor mat, // INT32
-  torch::Tensor mul, // FP32
-  torch::Tensor scales, // FP32
-  torch::Tensor zeros // FP32
+
+// Launcher for the faster kernel (accepts raw pointers)
+void vecquant4matmul_faster_launcher( // Renamed from _cuda
+    const c10::Half* vec_ptr, // Expects c10::Half*
+    const int* mat_ptr,
+    float* mul_ptr,
+    const float* scales_ptr,  // Expects float*
+    const float* zeros_ptr,   // Expects float*
+    int height,
+    int width,
+    cudaStream_t stream
 ) {
-  int height = mat.size(0); // Packed height (orig_height / 8)
-  int width = mat.size(1);  // Output features
-
-  TORCH_CHECK(vec.scalar_type() == torch::kFloat16, "vec must be FP16 for faster kernel");
-  TORCH_CHECK(mul.scalar_type() == torch::kFloat32, "mul must be FP32 for faster kernel");
-  TORCH_CHECK(scales.scalar_type() == torch::kFloat32, "scales must be FP32 for faster kernel");
-  TORCH_CHECK(zeros.scalar_type() == torch::kFloat32, "zeros must be FP32 for faster kernel");
-
-  // Basic dimension checks
-  TORCH_CHECK(vec.dim() >= 1, "vec must have at least 1 dimension");
-  TORCH_CHECK(mat.dim() == 2, "mat must be 2-dimensional");
-  TORCH_CHECK(mul.dim() >= 1, "mul must have at least 1 dimension");
-  TORCH_CHECK(scales.dim() >= 1, "scales must have at least 1 dimension");
-  TORCH_CHECK(zeros.dim() >= 1, "zeros must have at least 1 dimension");
-
-  // Check feature dimension consistency
-  int vec_features = vec.size(-1); // Last dimension of vec is input features
-  TORCH_CHECK(vec_features % 2 == 0, "vec features must be divisible by 2 for half2 access");
-  int expected_packed_height = (vec_features + 7) / 8; // ceil(vec_features / 8)
-  TORCH_CHECK(height == expected_packed_height, "Packed matrix height (mat.size(0)) does not match expected packed height based on vec features");
-  TORCH_CHECK(width == mul.size(-1), "Matrix width (mat.size(1)) must match output features (mul.size(-1))");
-  TORCH_CHECK(width == scales.size(-1), "Matrix width (mat.size(1)) must match scales features (scales.size(-1))");
-  TORCH_CHECK(width == zeros.size(-1), "Matrix width (mat.size(1)) must match zeros features (zeros.size(-1))");
-
-
-  // Grid dimensions
+  // Grid dimensions (calculated from height/width passed in)
   dim3 blocks(
     (height + BLOCKHEIGHT_4BIT - 1) / BLOCKHEIGHT_4BIT, // Number of blocks in Y dimension (for rows)
     (width + BLOCKWIDTH_4BIT - 1) / BLOCKWIDTH_4BIT    // Number of blocks in X dimension (for columns)
@@ -158,12 +116,12 @@ void vecquant4matmul_faster_cuda(
   // Block dimensions
   dim3 threads(BLOCKWIDTH_4BIT); // Threads per block
 
-  VecQuant4MatMulKernelFaster<<<blocks, threads>>>(
-    (half2*) vec.data_ptr(), // Cast to half2 pointer
-    mat.data_ptr<int>(),
-    mul.data_ptr<float>(),
-    scales.data_ptr<float>(),
-    zeros.data_ptr<float>(),
+  VecQuant4MatMulKernelFaster<<<blocks, threads, 0, stream>>>( // Use stream
+    (const half2*) vec_ptr, // Cast c10::Half* to half2*
+    mat_ptr,
+    mul_ptr,
+    scales_ptr,
+    zeros_ptr,
     height, // Packed height
     width
   );
@@ -228,11 +186,11 @@ __global__ void VecQuant4MatMulKernel_float(
 
 // Explicit kernel for HALF input
 __global__ void VecQuant4MatMulKernel_half(
-    const   half* __restrict__ vec,
+    const c10::Half* __restrict__ vec, // Use c10::Half
     const    int* __restrict__ mat,
            float* __restrict__ mul, // Output buffer MUST be float
-    const   half* __restrict__ scales,
-    const   half* __restrict__ zeros, // zero_point * scale
+    const c10::Half* __restrict__ scales, // Use c10::Half
+    const c10::Half* __restrict__ zeros, // Use c10::Half
     int height, // Packed height (orig_height / 8)
     int width
 ) {
@@ -247,8 +205,8 @@ __global__ void VecQuant4MatMulKernel_half(
     const int row_base = blockIdx.x * BLOCKHEIGHT_4BIT;
 
     // Load scale and zero for the current column
-    const half scale = scales[col];
-    const half zero = zeros[col]; // This is zero_point * scale
+    const c10::Half scale_h = scales[col]; // Use c10::Half
+    const c10::Half zero_h = zeros[col];   // Use c10::Half
 
     // Accumulator for the result - ALWAYS use float for accumulation
     float res = 0.0f;
@@ -268,19 +226,23 @@ __global__ void VecQuant4MatMulKernel_half(
         // This loop should be unrolled by the compiler
         #pragma unroll
         for (int i = 0; i < 8; ++i) {
-            // Extract the i-th 4-bit value and convert to half
-            half val_h = __int2half_rn((packed_val >> (i * 4)) & 0xF);
+            // Extract the i-th 4-bit value and convert to c10::Half
+            // Note: CUDA's half type is implicitly convertible for __int2half_rn if needed,
+            // but let's be explicit if direct conversion isn't available.
+            // Assuming __int2half_rn returns CUDA's half, which can be assigned/cast to c10::Half
+            c10::Half val_h = static_cast<c10::Half>(__int2half_rn((packed_val >> (i * 4)) & 0xF));
+
             // Dequantize: scale * quantized_value - zero_point * scale
             // Perform calculation in float due to disabled half operators
-            float dequant_val_f = __half2float(scale) * __half2float(val_h) - __half2float(zero);
-            // Multiply with corresponding vector element (half) and accumulate in float
+            float dequant_val_f = static_cast<float>(scale_h) * static_cast<float>(val_h) - static_cast<float>(zero_h);
+            // Multiply with corresponding vector element (c10::Half) and accumulate in float
             // Ensure we don't read past the end of the input vector if padding occurred
             // Note: The Python code pads the input vector, so this check might be redundant
             // if padding is guaranteed, but it's safer.
             // int vec_idx = original_row_base + i;
             // if (vec_idx < total_input_features) { // Need total_input_features passed or calculated
                  // Accumulate the float dequantized value multiplied by the float converted vector element
-                 res += dequant_val_f * __half2float(vec[original_row_base + i]);
+                 res += dequant_val_f * static_cast<float>(vec[original_row_base + i]);
             // }
         }
     }
