@@ -1,10 +1,12 @@
 from .quantilequantizer import QuantileQuantizer
 from .lloydmaxquant import LloydMaxQuantizer
 # Rename imported Quantizer to avoid clash if needed, or rely on specific import
-from .minmaxquant import Quantizer as MinMaxQuantizer, Quant3Linear, make_quant3, Quant4Linear, make_quant4
+from .minmaxquant import Quantizer as MinMaxQuantizer, Quant3Linear, make_quant3
 from .logquantizer import LogQuantizer
 from .kmeansquantizer import KMeansQuantizer # <-- Import added
 from .apotquantizer import APoTQuantizer # <-- Import added
+# Import 4-bit layer from its new file
+from .quant4linear import Quant4Linear, make_quant4
 # Keep the standalone affine quantize function if needed elsewhere
 from .minmaxquant import quantize as affine_quantize
 

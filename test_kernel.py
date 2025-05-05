@@ -26,8 +26,8 @@ except ImportError:
 try:
     # Assuming Quantizer is needed for the verification part
     from quant.minmaxquant import Quantizer, Quant3Linear # Keep Quant3Linear if comparing
-    # Import the new 4-bit layer and helper
-    from quant.minmaxquant import Quant4Linear, make_quant4
+    # Import the new 4-bit layer and helper from its new location
+    from quant.quant4linear import Quant4Linear, make_quant4
     _quant_layers_available = True
 except ImportError as e:
     print(f"Could not import quantization layers: {e}")
