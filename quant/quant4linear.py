@@ -124,9 +124,9 @@ class Quant4Linear(nn.Module):
                 # print("Warning: Faster kernel requires FP16 input. Casting input x.")
                 x_padded = x_padded.to(torch.float16)
             out = torch.zeros((x_padded.shape[0], self.outfeatures), dtype=torch.float32, device=x.device)
-            # Ensure scales/zeros are float32 for faster kernel
-            scales_f32 = self.scales.float()
-            zeros_f32 = self.zeros.float() # zero_point * scale
+            # Ensure scales/zeros are float32 and 1D for faster kernel
+            scales_f32 = self.scales.float().squeeze() # Squeeze last dim
+            zeros_f32 = self.zeros.float().squeeze()  # Squeeze last dim
             quant_cuda_4bit.vecquant4matmul_faster(x_padded, self.qweight, out, scales_f32, zeros_f32)
         else:
             # Standard kernel uses input type for output (unless input is FP16, then output is FP16)
