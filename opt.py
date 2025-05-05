@@ -108,7 +108,8 @@ def opt_sequential(model, dataloader, quantizer_name, dev):
         gptq = {}
         for name in subset:
             gptq[name] = GPTQ(subset[name])
-            gptq[name].quantizer = quantizer()
+            # Instantiate the specific quantizer class obtained earlier
+            gptq[name].quantizer = SpecificQuantizerClass()
             gptq[name].quantizer.configure(
                 args.wbits, perchannel=True, sym=args.sym, mse=False, trits=args.trits
             )
