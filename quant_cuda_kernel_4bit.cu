@@ -77,8 +77,8 @@ void vecquant4matmul_cuda(
   // Dispatch based on input type, but output `mul` must be float.
   TORCH_CHECK(mul.scalar_type() == torch::kFloat32, "mul tensor must be Float32 for vecquant4matmul_cuda");
 
-  AT_DISPATCH_FLOATING_TYPES_AND_HALF( // Support float and half for vec/scales/zeros
-    vec.scalar_type(), "vecquant4matmul_cuda", ([&] {
+  // Restrict dispatch to only float and half for the standard kernel input
+  AT_DISPATCH_FLOATING_TYPES_AND(at::ScalarType::Half, vec.scalar_type(), "vecquant4matmul_cuda", ([&] {
       // Ensure scales/zeros match the input vector type for the kernel call
       auto scales_casted = scales.to(vec.scalar_type());
       auto zeros_casted = zeros.to(vec.scalar_type());

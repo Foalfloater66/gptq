@@ -27,6 +27,9 @@ void vecquant4matmul(
   TORCH_CHECK(mat.scalar_type() == torch::kInt32, "mat must be an Int32 tensor");
   // Enforce float32 output for the standard kernel, as it now always accumulates in float
   TORCH_CHECK(mul.scalar_type() == torch::kFloat32, "mul tensor must be Float32 for vecquant4matmul");
+  // Enforce float or half input for the standard kernel
+  TORCH_CHECK(vec.scalar_type() == torch::kFloat32 || vec.scalar_type() == torch::kFloat16,
+              "vec tensor must be Float32 or Float16 for vecquant4matmul");
   // Add more shape/dimension checks if needed
   vecquant4matmul_cuda(vec, mat, mul, scales, zeros);
 }
