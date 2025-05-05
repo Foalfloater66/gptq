@@ -3,6 +3,7 @@
 #include <cuda.h>
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
+#include <c10/cuda/CUDAException.h> // For C10_CUDA_KERNEL_LAUNCH_CHECK
 
 // Forward declarations
 template <typename scalar_t>
@@ -73,14 +74,21 @@ void vecquant4matmul_cuda(
   // Block dimensions
   dim3 threads(BLOCKWIDTH_4BIT); // Threads per block
 
-  AT_DISPATCH_FLOATING_TYPES_AND_HALF( // Support float and half for vec/mul/scales/zeros
+  // Dispatch based on input type, but output `mul` must be float.
+  TORCH_CHECK(mul.scalar_type() == torch::kFloat32, "mul tensor must be Float32 for vecquant4matmul_cuda");
+
+  AT_DISPATCH_FLOATING_TYPES_AND_HALF( // Support float and half for vec/scales/zeros
     vec.scalar_type(), "vecquant4matmul_cuda", ([&] {
+      // Ensure scales/zeros match the input vector type for the kernel call
+      auto scales_casted = scales.to(vec.scalar_type());
+      auto zeros_casted = zeros.to(vec.scalar_type());
+
       VecQuant4MatMulKernel<<<blocks, threads>>>(
         vec.data_ptr<scalar_t>(),
         mat.data_ptr<int>(),
-        mul.data_ptr<scalar_t>(),
-        scales.data_ptr<scalar_t>(),
-        zeros.data_ptr<scalar_t>(),
+        mul.data_ptr<float>(), // Output is always float*
+        scales_casted.data_ptr<scalar_t>(),
+        zeros_casted.data_ptr<scalar_t>(),
         height, // Packed height
         width
       );
@@ -144,11 +152,12 @@ void vecquant4matmul_faster_cuda(
 
 // --- Kernel Implementations ---
 
+// Kernel modified: Accumulates in float, requires float output buffer `mul`
 template <typename scalar_t>
 __global__ void VecQuant4MatMulKernel(
     const  scalar_t* __restrict__ vec,
     const       int* __restrict__ mat,
-           scalar_t* __restrict__ mul,
+           float*    __restrict__ mul, // Output buffer MUST be float
     const  scalar_t* __restrict__ scales,
     const  scalar_t* __restrict__ zeros, // zero_point * scale
     int height, // Packed height (orig_height / 8)
@@ -168,8 +177,8 @@ __global__ void VecQuant4MatMulKernel(
     const scalar_t scale = scales[col];
     const scalar_t zero = zeros[col]; // This is zero_point * scale
 
-    // Accumulator for the result
-    scalar_t res = 0;
+    // Accumulator for the result - ALWAYS use float for accumulation
+    float res = 0.0f;
 
     // Loop over the packed rows assigned to this block
     for (int packed_row_offset = 0; packed_row_offset < BLOCKHEIGHT_4BIT; ++packed_row_offset) {
@@ -205,6 +214,7 @@ __global__ void VecQuant4MatMulKernel(
     // Note: The original kernel accumulated into shared memory first.
     // This simpler version uses atomicAdd directly. For very large matrices,
     // a shared memory reduction within the block might be faster.
+    // Perform atomicAdd on the float output buffer.
     atomicAdd(&mul[col], res);
 }
 
@@ -269,8 +279,10 @@ __global__ void VecQuant4MatMulKernelFaster(
                  half2 dequant_h2 = __hfma2(vals_h2, scale_h2, zero_h2);
 
                  // Multiply dequantized weights with vector elements and accumulate
-                 // res += dequant_h2.x * vec_h2.x + dequant_h2.y * vec_h2.y
-                 res = __hfma2_sum(dequant_h2, vec_h2, res);
+                 // res += dequant_h2.x * vec_h2.x + dequant_h2.y * vec_h2.y;
+                 // Manual summation as __hfma2_sum might not be available/standard
+                 res += __half2float(dequant_h2.x) * __half2float(vec_h2.x);
+                 res += __half2float(dequant_h2.y) * __half2float(vec_h2.y);
             // }
         }
     }
