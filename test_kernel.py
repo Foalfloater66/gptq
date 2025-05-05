@@ -157,13 +157,16 @@ else:
 
 
 # --- Verification Section ---
-if _quant_layers_available and _quant_cuda_4bit_available:
-    print('\nVerifying 4-bit kernel correctness ...')
+# Note: Benchmarking section remains unchanged as kernel speed isn't expected
+#       to significantly vary based on how scales/zeros were derived.
+
+if _quant_layers_available and _quant_cuda_4bit_available and _other_quantizers_available:
+    print('\nVerifying 4-bit kernel correctness with different quantization methods...')
 
     # --- Verification Dimensions ---
     # Use smaller dimensions for verification if needed
-    M_VERIF = 4096 # Input features
-    N_VERIF = 4096 # Output features
+    M_VERIF = 1024 # Input features - Use smaller dimensions for faster verification loop
+    N_VERIF = 1024 # Output features
 
     # Ensure M_VERIF is divisible by 8 for packing/kernel
     if M_VERIF % 8 != 0:
@@ -171,72 +174,119 @@ if _quant_layers_available and _quant_cuda_4bit_available:
         print(f"Adjusting verification M to {M_VERIF} (must be divisible by 8)")
 
     # Create a standard float linear layer
-    layer = nn.Linear(M_VERIF, N_VERIF, bias=False) # Bias=False simplifies verification slightly
-    layer = layer.to(DEV).to(torch.float) # Use float for quantization process
+    layer_orig = nn.Linear(M_VERIF, N_VERIF, bias=False) # Bias=False simplifies verification slightly
+    layer_orig = layer_orig.to(DEV).to(torch.float) # Use float for quantization process
     vec = torch.randn(M_VERIF, device=DEV, dtype=torch.float) # Input vector
 
-    # --- Quantize to 4-bit ---
-    # Use the Quantizer from minmaxquant (or your chosen quantizer)
-    quantizer_4bit = Quantizer()
-    # Configure for 4 bits, per-channel, asymmetric
-    quantizer_4bit.configure(4, perchannel=True, sym=False, mse=False)
-    # Find quantization parameters (scale, integer zero point)
-    quantizer_4bit.find_params(layer.weight.data, weight=True)
+    # --- Loop through different quantizers ---
+    # Note: MinMaxQuantizer is imported as 'Quantizer'
+    quantizer_types = {
+        "MinMax": Quantizer,
+        "KMeans": KMeansQuantizer,
+        "Log": LogQuantizer,
+        "APoT": APoTQuantizer,
+        "Quantile": QuantileQuantizer,
+        "LloydMax": LloydMaxQuantizer
+    }
 
-    # --- Create Simulated Quantized Layer (for comparison) ---
-    # Apply quantization in float to simulate the operation
-    # Q_sim(w) = (clamp(round(w / scale + zero_int), 0, 15) - zero_int) * scale
-    # Need the quantize function, assuming it's available from the import
-    from quant.minmaxquant import quantize # Make sure quantize is imported or defined
-    weight_q_sim = quantize(
-        layer.weight.data, quantizer_4bit.scale, quantizer_4bit.zero, quantizer_4bit.maxq
-    )
-    layer_sim = nn.Linear(M_VERIF, N_VERIF, bias=False)
-    layer_sim.weight.data = weight_q_sim
-    layer_sim = layer_sim.to(DEV)
+    for name, QuantizerClass in quantizer_types.items():
+        print(f"\n--- Verifying with {name} Quantizer ---")
+        layer = nn.Linear(M_VERIF, N_VERIF, bias=False).to(DEV)
+        layer.weight.data.copy_(layer_orig.weight.data) # Start with fresh weights
 
-    # --- Create Quant4Linear Layer ---
-    qlayer_4bit = Quant4Linear(layer.in_features, layer.out_features, faster=False) # Test standard kernel first
-    # Pack the original layer's weights using the found scales and integer zero points
-    # The pack method will calculate zero_point * scale internally
-    qlayer_4bit.pack(layer, quantizer_4bit.scale, quantizer_4bit.zero)
-    qlayer_4bit = qlayer_4bit.to(DEV)
+        # 1. Instantiate and configure the specific quantizer
+        quantizer_specific = QuantizerClass()
+        # Configure for 4 bits. Add specific kwargs if needed (e.g., for LloydMax)
+        quantizer_specific.configure(bits=4, max_iterations=10) # Example: max_iterations for LloydMax
+        print("Finding specific quantization parameters...")
+        quantizer_specific.find_params(layer.weight.data, weight=True)
 
-    # --- Create Quant4Linear Layer (Faster version) ---
-    # Note: Faster kernel needs FP16 input. We'll cast the input vector later.
-    qlayer_4bit_faster = Quant4Linear(layer.in_features, layer.out_features, faster=True)
-    qlayer_4bit_faster.pack(layer, quantizer_4bit.scale, quantizer_4bit.zero)
-    qlayer_4bit_faster = qlayer_4bit_faster.to(DEV)
+        if not quantizer_specific.ready():
+            print(f"Skipping {name} as quantizer is not ready after find_params.")
+            continue
+
+        # 2. Quantize weights using the specific quantizer's logic (for reference)
+        #    This step isn't strictly needed for packing but useful for understanding
+        with torch.no_grad():
+             quantized_weights_specific = quantizer_specific.quantize(layer.weight.data)
+
+        # 3. Find *Affine* parameters (scale, zero) for the `quantized_weights_specific`
+        #    We use MinMaxQuantizer (Quantizer) to find the best affine fit
+        #    to the weights already quantized by the specific method.
+        print("Finding *affine* parameters for the specifically quantized weights...")
+        affine_quantizer = Quantizer()
+        affine_quantizer.configure(bits=4, perchannel=True, sym=False, mse=False)
+        # Find scale/zero for the weights *already quantized* by KMeans/Log/etc.
+        affine_quantizer.find_params(quantized_weights_specific.detach(), weight=True)
+
+        if not affine_quantizer.ready():
+            print(f"Skipping {name} as affine quantizer is not ready.")
+            continue
+
+        affine_scale = affine_quantizer.scale
+        affine_zero = affine_quantizer.zero # This is the integer zero point
+
+        # --- Create Simulated *Affine* Quantized Layer (for comparison) ---
+        # We simulate using the affine parameters found in step 3, applied to *original* weights
+        # This shows what the ideal affine quantization (using these params) would look like.
+        from quant.minmaxquant import quantize # Make sure quantize is imported or defined
+        # Use original layer weights and the *affine* scale/zero derived from the specific quantizer's output
+        weight_q_sim = quantize(
+            layer.weight.data, affine_scale, affine_zero, affine_quantizer.maxq
+        )
+        layer_sim = nn.Linear(M_VERIF, N_VERIF, bias=False).to(DEV)
+        layer_sim.weight.data = weight_q_sim.to(layer_sim.weight.dtype)
 
 
-    # --- Run Verification ---
-    with torch.no_grad():
-        # 1. Simulated quantization output (Float)
-        out_sim = layer_sim(vec)
-        print(f'\nSimulated (Float): {out_sim.abs().mean().item():.5f} (mean abs val)')
+        # --- Create Quant4Linear Layer (using the derived affine parameters) ---
+        print("Packing weights into Quant4Linear using derived affine parameters...")
+        qlayer_4bit = Quant4Linear(layer.in_features, layer.out_features, faster=False)
+        # Pack the *original* layer's weights using the *affine* scales and *affine* integer zero points
+        qlayer_4bit.pack(layer, affine_scale, affine_zero)
+        qlayer_4bit = qlayer_4bit.to(DEV)
 
-        # 2. Kernel output (Standard, Float input -> Float output)
-        out_kern = qlayer_4bit(vec)
-        print(f'Kernel Std (F32):  {out_kern.abs().mean().item():.5f} (mean abs val)')
-        print(f'--> Diff (Sim vs Kern Std): {(out_sim - out_kern).abs().mean().item():.8f}')
-
-        # 3. Kernel output (Standard, Half input -> Half output)
-        #    Requires casting input and potentially adjusting layer params if needed
-        qlayer_4bit_fp16 = Quant4Linear(layer.in_features, layer.out_features, faster=False)
-        qlayer_4bit_fp16.pack(layer, quantizer_4bit.scale.half(), quantizer_4bit.zero.half()) # Use half params
-        qlayer_4bit_fp16 = qlayer_4bit_fp16.to(DEV)
-        out_kern_fp16 = qlayer_4bit_fp16(vec.half())
-        print(f'Kernel Std (F16):  {out_kern_fp16.abs().mean().item():.5f} (mean abs val)')
-        print(f'--> Diff (Sim vs Kern F16): {(out_sim.half() - out_kern_fp16).abs().mean().item():.8f}')
+        # --- Create Quant4Linear Layer (Faster version) ---
+        qlayer_4bit_faster = Quant4Linear(layer.in_features, layer.out_features, faster=True)
+        qlayer_4bit_faster.pack(layer, affine_scale, affine_zero)
+        qlayer_4bit_faster = qlayer_4bit_faster.to(DEV)
 
 
-        # 4. Kernel output (Faster, Half input -> Float output)
-        if qlayer_4bit_faster.faster: # Check if faster kernel was actually enabled
-             out_kern_faster = qlayer_4bit_faster(vec.half()) # Input must be half
-             print(f'Kernel Fst (F16->F32): {out_kern_faster.abs().mean().item():.5f} (mean abs val)')
-             print(f'--> Diff (Sim vs Kern Fst): {(out_sim - out_kern_faster).abs().mean().item():.8f}')
-        else:
-             print("Skipping faster kernel verification (not enabled or available).")
+        # --- Run Verification (Comparing Quant4Linear output to the *simulated affine* output) ---
+        with torch.no_grad():
+            # 1. Simulated *Affine* quantization output (Float)
+            out_sim = layer_sim(vec.to(layer_sim.weight.dtype))
+            print(f'Simulated Affine (Float): {out_sim.abs().mean().item():.5f} (mean abs val)')
+
+            # 2. Kernel output (Standard, Float input -> Float output)
+            out_kern = qlayer_4bit(vec)
+            print(f'Kernel Std (F32):         {out_kern.abs().mean().item():.5f} (mean abs val)')
+            print(f'--> Diff (Sim Affine vs Kern Std): {(out_sim - out_kern).abs().mean().item():.8f}')
+
+            # 3. Kernel output (Standard, Half input -> Half output)
+            #    Requires casting input and potentially adjusting layer params if needed
+            qlayer_4bit_fp16 = Quant4Linear(layer.in_features, layer.out_features, faster=False)
+            # Pack using half-precision affine scale/zero derived earlier
+            qlayer_4bit_fp16.pack(layer, affine_scale.half(), affine_zero.half())
+            qlayer_4bit_fp16 = qlayer_4bit_fp16.to(DEV)
+            out_kern_fp16 = qlayer_4bit_fp16(vec.half())
+            print(f'Kernel Std (F16):         {out_kern_fp16.abs().mean().item():.5f} (mean abs val)')
+            # Compare FP16 kernel output to FP16 simulated output
+            print(f'--> Diff (Sim Affine vs Kern F16): {(out_sim.half() - out_kern_fp16).abs().mean().item():.8f}')
+
+
+            # 4. Kernel output (Faster, Half input -> Float output)
+            if qlayer_4bit_faster.faster: # Check if faster kernel was actually enabled
+                 out_kern_faster = qlayer_4bit_faster(vec.half()) # Input must be half
+                 print(f'Kernel Fst (F16->F32):    {out_kern_faster.abs().mean().item():.5f} (mean abs val)')
+                 # Compare FP32 kernel output to FP32 simulated output
+                 print(f'--> Diff (Sim Affine vs Kern Fst): {(out_sim - out_kern_faster).abs().mean().item():.8f}')
+            else:
+                 print("Skipping faster kernel verification (not enabled or available).")
+
+        # Clean up memory (optional, but good practice in a loop)
+        del layer, quantizer_specific, quantized_weights_specific, affine_quantizer
+        del layer_sim, qlayer_4bit, qlayer_4bit_faster, qlayer_4bit_fp16
+        torch.cuda.empty_cache()
 
 else:
-    print("\nSkipping verification (Quantization layers or 4-bit CUDA module not found).")
+    print("\nSkipping verification (Quantization layers, 4-bit CUDA module, or other quantizers not found).")
