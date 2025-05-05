@@ -17,6 +17,8 @@ setup(
         # See PyTorch documentation for cpp_extension.CUDAExtension for details
         # Example for targeting specific compute capability:
         # extra_compile_args={'nvcc': ['-gencode=arch=compute_75,code=sm_75']} # Example for Turing
+        # Force the CXX11 ABI to match PyTorch (likely built with new ABI)
+        extra_compile_args={'cxx': ['-D_GLIBCXX_USE_CXX11_ABI=1']}
     )],
     cmdclass={
         'build_ext': cpp_extension.BuildExtension # Use PyTorch's build extension command
