@@ -1,0 +1,280 @@
+#include <torch/all.h>
+#include <torch/python.h>
+#include <cuda.h>
+#include <cuda_runtime.h>
+#include <cuda_fp16.h>
+
+// Forward declarations
+template <typename scalar_t>
+__global__ void VecQuant4MatMulKernel(
+    const  scalar_t* __restrict__ vec,
+    const       int* __restrict__ mat,
+           scalar_t* __restrict__ mul,
+    const  scalar_t* __restrict__ scales,
+    const  scalar_t* __restrict__ zeros, // Note: This is zero_point * scale
+    int height, // Packed height (orig_height / 8)
+    int width
+);
+
+__global__ void VecQuant4MatMulKernelFaster(
+    const  half2* __restrict__ vec, // Input vector (FP16)
+    const    int* __restrict__ mat, // Packed weights (INT32)
+           float* __restrict__ mul, // Output vector (FP32)
+    const  float* __restrict__ scales, // FP32 scales
+    const  float* __restrict__ zeros,  // FP32 zero points * scales
+    int height, // Packed height (orig_height / 8)
+    int width
+);
+
+// --- Configuration ---
+// These can be tuned depending on the GPU architecture and matrix sizes
+const int BLOCKWIDTH_4BIT  = 256; // Threads per block (must be multiple of 8 for 4-bit)
+const int BLOCKHEIGHT_4BIT = 8;   // Rows processed per block per iteration (tune for occupancy)
+// ---
+
+// Helper function to reinterpret int bits as unsigned int
+__device__ inline unsigned int as_unsigned(int i) {
+  return *reinterpret_cast<unsigned int*>(&i);
+}
+
+// --- CUDA Function Implementations ---
+
+void vecquant4matmul_cuda(
+  torch::Tensor vec,
+  torch::Tensor mat,
+  torch::Tensor mul,
+  torch::Tensor scales,
+  torch::Tensor zeros
+) {
+  int height = mat.size(0); // Packed height (orig_height / 8)
+  int width = mat.size(1);  // Output features
+
+  // Basic dimension checks - more robust checks could be added
+  TORCH_CHECK(vec.dim() >= 1, "vec must have at least 1 dimension");
+  TORCH_CHECK(mat.dim() == 2, "mat must be 2-dimensional");
+  TORCH_CHECK(mul.dim() >= 1, "mul must have at least 1 dimension");
+  TORCH_CHECK(scales.dim() >= 1, "scales must have at least 1 dimension");
+  TORCH_CHECK(zeros.dim() >= 1, "zeros must have at least 1 dimension");
+
+  // Check feature dimension consistency
+  int vec_features = vec.size(-1); // Last dimension of vec is input features
+  int expected_packed_height = (vec_features + 7) / 8; // ceil(vec_features / 8)
+  TORCH_CHECK(height == expected_packed_height, "Packed matrix height (mat.size(0)) does not match expected packed height based on vec features");
+  TORCH_CHECK(width == mul.size(-1), "Matrix width (mat.size(1)) must match output features (mul.size(-1))");
+  TORCH_CHECK(width == scales.size(-1), "Matrix width (mat.size(1)) must match scales features (scales.size(-1))");
+  TORCH_CHECK(width == zeros.size(-1), "Matrix width (mat.size(1)) must match zeros features (zeros.size(-1))");
+
+
+  // Grid dimensions
+  dim3 blocks(
+    (height + BLOCKHEIGHT_4BIT - 1) / BLOCKHEIGHT_4BIT, // Number of blocks in Y dimension (for rows)
+    (width + BLOCKWIDTH_4BIT - 1) / BLOCKWIDTH_4BIT    // Number of blocks in X dimension (for columns)
+  );
+  // Block dimensions
+  dim3 threads(BLOCKWIDTH_4BIT); // Threads per block
+
+  AT_DISPATCH_FLOATING_TYPES_AND_HALF( // Support float and half for vec/mul/scales/zeros
+    vec.scalar_type(), "vecquant4matmul_cuda", ([&] {
+      VecQuant4MatMulKernel<<<blocks, threads>>>(
+        vec.data_ptr<scalar_t>(),
+        mat.data_ptr<int>(),
+        mul.data_ptr<scalar_t>(),
+        scales.data_ptr<scalar_t>(),
+        zeros.data_ptr<scalar_t>(),
+        height, // Packed height
+        width
+      );
+    })
+  );
+   C10_CUDA_KERNEL_LAUNCH_CHECK(); // Check for kernel launch errors
+}
+
+void vecquant4matmul_faster_cuda(
+  torch::Tensor vec, // FP16
+  torch::Tensor mat, // INT32
+  torch::Tensor mul, // FP32
+  torch::Tensor scales, // FP32
+  torch::Tensor zeros // FP32
+) {
+  int height = mat.size(0); // Packed height (orig_height / 8)
+  int width = mat.size(1);  // Output features
+
+  TORCH_CHECK(vec.scalar_type() == torch::kFloat16, "vec must be FP16 for faster kernel");
+  TORCH_CHECK(mul.scalar_type() == torch::kFloat32, "mul must be FP32 for faster kernel");
+  TORCH_CHECK(scales.scalar_type() == torch::kFloat32, "scales must be FP32 for faster kernel");
+  TORCH_CHECK(zeros.scalar_type() == torch::kFloat32, "zeros must be FP32 for faster kernel");
+
+  // Basic dimension checks
+  TORCH_CHECK(vec.dim() >= 1, "vec must have at least 1 dimension");
+  TORCH_CHECK(mat.dim() == 2, "mat must be 2-dimensional");
+  TORCH_CHECK(mul.dim() >= 1, "mul must have at least 1 dimension");
+  TORCH_CHECK(scales.dim() >= 1, "scales must have at least 1 dimension");
+  TORCH_CHECK(zeros.dim() >= 1, "zeros must have at least 1 dimension");
+
+  // Check feature dimension consistency
+  int vec_features = vec.size(-1); // Last dimension of vec is input features
+  TORCH_CHECK(vec_features % 2 == 0, "vec features must be divisible by 2 for half2 access");
+  int expected_packed_height = (vec_features + 7) / 8; // ceil(vec_features / 8)
+  TORCH_CHECK(height == expected_packed_height, "Packed matrix height (mat.size(0)) does not match expected packed height based on vec features");
+  TORCH_CHECK(width == mul.size(-1), "Matrix width (mat.size(1)) must match output features (mul.size(-1))");
+  TORCH_CHECK(width == scales.size(-1), "Matrix width (mat.size(1)) must match scales features (scales.size(-1))");
+  TORCH_CHECK(width == zeros.size(-1), "Matrix width (mat.size(1)) must match zeros features (zeros.size(-1))");
+
+
+  // Grid dimensions
+  dim3 blocks(
+    (height + BLOCKHEIGHT_4BIT - 1) / BLOCKHEIGHT_4BIT, // Number of blocks in Y dimension (for rows)
+    (width + BLOCKWIDTH_4BIT - 1) / BLOCKWIDTH_4BIT    // Number of blocks in X dimension (for columns)
+  );
+  // Block dimensions
+  dim3 threads(BLOCKWIDTH_4BIT); // Threads per block
+
+  VecQuant4MatMulKernelFaster<<<blocks, threads>>>(
+    (half2*) vec.data_ptr(), // Cast to half2 pointer
+    mat.data_ptr<int>(),
+    mul.data_ptr<float>(),
+    scales.data_ptr<float>(),
+    zeros.data_ptr<float>(),
+    height, // Packed height
+    width
+  );
+   C10_CUDA_KERNEL_LAUNCH_CHECK(); // Check for kernel launch errors
+}
+
+
+// --- Kernel Implementations ---
+
+template <typename scalar_t>
+__global__ void VecQuant4MatMulKernel(
+    const  scalar_t* __restrict__ vec,
+    const       int* __restrict__ mat,
+           scalar_t* __restrict__ mul,
+    const  scalar_t* __restrict__ scales,
+    const  scalar_t* __restrict__ zeros, // zero_point * scale
+    int height, // Packed height (orig_height / 8)
+    int width
+) {
+    // Calculate the column index for this thread
+    const int col = blockIdx.y * BLOCKWIDTH_4BIT + threadIdx.x;
+
+    // Bounds check for column
+    if (col >= width) return;
+
+    // Calculate the starting row index for this block
+    // Each block processes BLOCKHEIGHT_4BIT packed rows (BLOCKHEIGHT_4BIT * 8 original rows)
+    const int row_base = blockIdx.x * BLOCKHEIGHT_4BIT;
+
+    // Load scale and zero for the current column
+    const scalar_t scale = scales[col];
+    const scalar_t zero = zeros[col]; // This is zero_point * scale
+
+    // Accumulator for the result
+    scalar_t res = 0;
+
+    // Loop over the packed rows assigned to this block
+    for (int packed_row_offset = 0; packed_row_offset < BLOCKHEIGHT_4BIT; ++packed_row_offset) {
+        const int packed_row = row_base + packed_row_offset;
+        // Bounds check for row (important if height is not perfectly divisible by BLOCKHEIGHT_4BIT)
+        if (packed_row >= height) continue;
+
+        const int original_row_base = packed_row * 8; // Base row in the original un-packed matrix
+
+        // Load the packed 32-bit integer containing 8 x 4-bit weights
+        const unsigned int packed_val = as_unsigned(mat[packed_row * width + col]);
+
+        // Unpack 8 values and multiply-accumulate with corresponding vector elements
+        // This loop should be unrolled by the compiler
+        #pragma unroll
+        for (int i = 0; i < 8; ++i) {
+            // Extract the i-th 4-bit value
+            scalar_t val = static_cast<scalar_t>((packed_val >> (i * 4)) & 0xF);
+            // Dequantize: scale * quantized_value - zero_point * scale
+            scalar_t dequant_val = scale * val - zero;
+            // Multiply with corresponding vector element and accumulate
+            // Ensure we don't read past the end of the input vector if padding occurred
+            // Note: The Python code pads the input vector, so this check might be redundant
+            // if padding is guaranteed, but it's safer.
+            // int vec_idx = original_row_base + i;
+            // if (vec_idx < total_input_features) { // Need total_input_features passed or calculated
+                 res += dequant_val * vec[original_row_base + i];
+            // }
+        }
+    }
+
+    // Atomically add the partial result to the output vector element
+    // Note: The original kernel accumulated into shared memory first.
+    // This simpler version uses atomicAdd directly. For very large matrices,
+    // a shared memory reduction within the block might be faster.
+    atomicAdd(&mul[col], res);
+}
+
+
+__global__ void VecQuant4MatMulKernelFaster(
+    const  half2* __restrict__ vec, // Input vector (FP16 pairs)
+    const    int* __restrict__ mat, // Packed weights (INT32)
+           float* __restrict__ mul, // Output vector (FP32)
+    const  float* __restrict__ scales, // FP32 scales
+    const  float* __restrict__ zeros,  // FP32 zero points * scales
+    int height, // Packed height (orig_height / 8)
+    int width
+) {
+    // Calculate the column index for this thread
+    const int col = blockIdx.y * BLOCKWIDTH_4BIT + threadIdx.x;
+
+    // Bounds check for column
+    if (col >= width) return;
+
+    // Calculate the starting row index for this block
+    const int row_base = blockIdx.x * BLOCKHEIGHT_4BIT;
+
+    // Load scale and zero for the current column as half2
+    // Note: We negate zero here because we use FMA: val * scale + (-zero)
+    const half2 scale_h2 = __float2half2_rn(scales[col]);
+    const half2 zero_h2  = __float2half2_rn(-zeros[col]); // Negated zero_point * scale
+
+    // Accumulator for the result (using float for better precision)
+    float res = 0.0f;
+
+    // Loop over the packed rows assigned to this block
+    for (int packed_row_offset = 0; packed_row_offset < BLOCKHEIGHT_4BIT; ++packed_row_offset) {
+        const int packed_row = row_base + packed_row_offset;
+        // Bounds check for row
+        if (packed_row >= height) continue;
+
+        // Base row in the original un-packed matrix, divided by 2 for half2 indexing
+        const int original_row_base_div2 = (packed_row * 8) / 2;
+
+        // Load the packed 32-bit integer containing 8 x 4-bit weights
+        const unsigned int packed_val = as_unsigned(mat[packed_row * width + col]);
+
+        // Process 4 pairs of 4-bit values (4 * half2)
+        #pragma unroll
+        for (int i = 0; i < 4; ++i) { // i iterates over half2 elements
+            // Extract two 4-bit values (8 bits total)
+            unsigned int two_vals = (packed_val >> (i * 8)) & 0xFF;
+
+            // Convert the two 4-bit integers to two half-precision floats
+            half val_lo = __int2half_rn(two_vals & 0xF);        // Lower 4 bits
+            half val_hi = __int2half_rn((two_vals >> 4) & 0xF); // Upper 4 bits
+            half2 vals_h2 = __halves2half2(val_lo, val_hi);
+
+            // Load corresponding pair of vector elements
+            // Ensure we don't read past the end of the input vector (in half2 units)
+            // int vec_idx_h2 = original_row_base_div2 + i;
+            // if (vec_idx_h2 < total_input_features / 2) { // Need total_input_features
+                 half2 vec_h2 = vec[original_row_base_div2 + i];
+
+                 // Dequantize and multiply using fused multiply-add (FMA)
+                 // dequant = vals_h2 * scale_h2 + (-zero_h2)
+                 half2 dequant_h2 = __hfma2(vals_h2, scale_h2, zero_h2);
+
+                 // Multiply dequantized weights with vector elements and accumulate
+                 // res += dequant_h2.x * vec_h2.x + dequant_h2.y * vec_h2.y
+                 res = __hfma2_sum(dequant_h2, vec_h2, res);
+            // }
+        }
+    }
+
+    // Atomically add the partial result (float) to the output vector element (float)
+    atomicAdd(&mul[col], res);
+}
