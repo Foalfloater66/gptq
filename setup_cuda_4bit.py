@@ -1,0 +1,24 @@
+from setuptools import setup, Extension
+from torch.utils import cpp_extension
+import os
+
+# Set CUDA_HOME if necessary, or ensure nvcc is in your PATH
+# Example: os.environ['CUDA_HOME'] = '/usr/local/cuda'
+
+setup(
+    name='quant_cuda_4bit', # The name of the package
+    ext_modules=[cpp_extension.CUDAExtension(
+        'quant_cuda_4bit', # The name of the extension module (what you import)
+        [
+            'quant_cuda_4bit.cpp',      # C++ source file (bindings)
+            'quant_cuda_kernel_4bit.cu' # CUDA source file (kernel implementation)
+        ],
+        # Optional: Add extra compile args if needed, e.g., for specific GPU architectures
+        # See PyTorch documentation for cpp_extension.CUDAExtension for details
+        # Example for targeting specific compute capability:
+        # extra_compile_args={'nvcc': ['-gencode=arch=compute_75,code=sm_75']} # Example for Turing
+    )],
+    cmdclass={
+        'build_ext': cpp_extension.BuildExtension # Use PyTorch's build extension command
+    }
+)
