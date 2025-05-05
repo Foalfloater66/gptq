@@ -1,7 +1,7 @@
 from .quantilequantizer import QuantileQuantizer
 from .lloydmaxquant import LloydMaxQuantizer
 # Rename imported Quantizer to avoid clash if needed, or rely on specific import
-from .minmaxquant import Quantizer as MinMaxQuantizer
+from .minmaxquant import Quantizer as MinMaxQuantizer, Quant3Linear, make_quant3, Quant4Linear, make_quant4
 from .logquantizer import LogQuantizer
 from .kmeansquantizer import KMeansQuantizer # <-- Import added
 from .apotquantizer import APoTQuantizer # <-- Import added
