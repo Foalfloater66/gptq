@@ -4,10 +4,27 @@ import os   # <-- Add import
 
 import torch
 import torch.nn as nn
+import math # Add math import
 
 from gptq import *
 from modelutils import *
-from quant import get_quantizer
+from quant import get_quantizer, Quantizer, Quant3Linear, make_quant3 # Import Quant3Linear
+from quant.quant4linear import Quant4Linear, make_quant4 # Import 4-bit layer
+
+# Import CUDA modules
+try:
+    import quant_cuda
+    _quant_cuda_3bit_available = True
+except ImportError:
+    print("CUDA 3-bit kernel not found.")
+    _quant_cuda_3bit_available = False
+
+try:
+    import quant_cuda_4bit
+    _quant_cuda_4bit_available = True
+except ImportError:
+    print("CUDA 4-bit kernel not found.")
+    _quant_cuda_4bit_available = False
 
 
 def get_opt(model):
@@ -235,6 +252,114 @@ def opt_eval(model, testenc, dev):
 
     return ppl.item() # Return the perplexity
 
+
+def benchmark_kernels(args, dev):
+    """Runs low-level benchmarks for the 3-bit and 4-bit CUDA kernels."""
+    print('Benchmarking Custom CUDA Kernels ...')
+
+    # --- Benchmark Dimensions (from test_kernel.py) ---
+    M_BENCH = 12288 * 4 # Input features (e.g., OPT-175B FFN)
+    N_BENCH = 12288     # Output features
+    COUNT = 1000        # Number of iterations
+
+    # --- Setup Data ---
+    DTYPE_FP16 = torch.half
+    DTYPE_FLOAT = torch.float
+    vec_fp16 = torch.randn((1, M_BENCH), device=dev, dtype=DTYPE_FP16)
+    vec_f32 = vec_fp16.float()
+    mul_fp16 = torch.zeros((1, N_BENCH), device=dev, dtype=DTYPE_FP16)
+    mul_f32 = torch.zeros((1, N_BENCH), device=dev, dtype=DTYPE_FLOAT)
+
+    # --- FP16 Baseline (Optional but good reference) ---
+    print("\n--- FP16 PyTorch Benchmark ---")
+    mat_fp16 = torch.randn((M_BENCH, N_BENCH), device=dev, dtype=DTYPE_FP16)
+    tick = time.time()
+    for _ in range(COUNT):
+        torch.matmul(vec_fp16, mat_fp16, out=mul_fp16)
+        torch.cuda.synchronize()
+    print(f'FP16 MatVec Time: {(time.time() - tick) / COUNT:.6f} seconds')
+    del mat_fp16, mul_fp16 # Free memory
+
+    # --- 3-bit Benchmark ---
+    if _quant_cuda_3bit_available:
+        print("\n--- 3-bit Kernel Benchmark ---")
+        packed_height_3bit = M_BENCH // 32 * 3
+        mat_int3_packed = torch.randint(-1000000000, 1000000000, (packed_height_3bit, N_BENCH), device=dev, dtype=torch.int)
+        scales_3bit = torch.randn(N_BENCH, device=dev, dtype=DTYPE_FLOAT)
+        zeros_3bit = torch.randn(N_BENCH, device=dev, dtype=DTYPE_FLOAT) # zero_point * scale
+
+        # Benchmark standard 3-bit kernel (FP32 input)
+        mul_f32.zero_()
+        tick = time.time()
+        for _ in range(COUNT):
+            quant_cuda.vecquant3matmul(vec_f32, mat_int3_packed, mul_f32, scales_3bit, zeros_3bit)
+            torch.cuda.synchronize()
+        print(f'3-bit MatVec Time (FP32 in): {(time.time() - tick) / COUNT:.6f} seconds')
+
+        # Benchmark faster 3-bit kernel (FP16 input -> FP32 output)
+        mul_f32.zero_()
+        tick = time.time()
+        for _ in range(COUNT):
+            quant_cuda.vecquant3matmul_faster(vec_fp16, mat_int3_packed, mul_f32, scales_3bit, zeros_3bit)
+            torch.cuda.synchronize()
+        print(f'3-bit MatVec Time (Faster, FP16 in): {(time.time() - tick) / COUNT:.6f} seconds')
+        del mat_int3_packed, scales_3bit, zeros_3bit # Free memory
+    else:
+        print("\nSkipping 3-bit kernel benchmark (CUDA module not found).")
+
+    # --- 4-bit Benchmark ---
+    if _quant_cuda_4bit_available:
+        print("\n--- 4-bit Kernel Benchmark ---")
+        # Ensure M_BENCH is divisible by 8
+        if M_BENCH % 8 != 0:
+             print(f"Warning: M_BENCH ({M_BENCH}) not divisible by 8. Adjusting for benchmark.")
+             M_BENCH_4BIT = (M_BENCH // 8) * 8
+             vec_fp16_4b = vec_fp16[:, :M_BENCH_4BIT]
+             vec_f32_4b = vec_f32[:, :M_BENCH_4BIT]
+        else:
+             M_BENCH_4BIT = M_BENCH
+             vec_fp16_4b = vec_fp16
+             vec_f32_4b = vec_f32
+
+        packed_height_4bit = M_BENCH_4BIT // 8
+        min_int32 = -(2**31)
+        max_int32_exclusive = 2**31
+        mat_int4_packed = torch.randint(min_int32, max_int32_exclusive, (packed_height_4bit, N_BENCH), device=dev, dtype=torch.int32)
+        scales_4bit_f32 = torch.randn(N_BENCH, device=dev, dtype=DTYPE_FLOAT)
+        zeros_4bit_f32 = torch.randn(N_BENCH, device=dev, dtype=DTYPE_FLOAT) # zero_point * scale
+        scales_4bit_f16 = scales_4bit_f32.half()
+        zeros_4bit_f16 = zeros_4bit_f32.half()
+
+        # Benchmark standard 4-bit kernel (FP32 input -> FP32 output)
+        mul_f32.zero_()
+        tick = time.time()
+        for _ in range(COUNT):
+            quant_cuda_4bit.vecquant4matmul(vec_f32_4b, mat_int4_packed, mul_f32, scales_4bit_f32, zeros_4bit_f32)
+            torch.cuda.synchronize()
+        print(f'4-bit MatVec Time (FP32 in -> FP32 out): {(time.time() - tick) / COUNT:.6f} seconds')
+
+        # Benchmark standard 4-bit kernel (FP16 input -> FP32 output)
+        mul_f32.zero_()
+        tick = time.time()
+        for _ in range(COUNT):
+            quant_cuda_4bit.vecquant4matmul(vec_fp16_4b, mat_int4_packed, mul_f32, scales_4bit_f16, zeros_4bit_f16)
+            torch.cuda.synchronize()
+        print(f'4-bit MatVec Time (FP16 in -> FP32 out): {(time.time() - tick) / COUNT:.6f} seconds')
+
+        # Benchmark faster 4-bit kernel (FP16 input -> FP32 output)
+        mul_f32.zero_()
+        tick = time.time()
+        for _ in range(COUNT):
+            quant_cuda_4bit.vecquant4matmul_faster(vec_fp16_4b, mat_int4_packed, mul_f32, scales_4bit_f32, zeros_4bit_f32)
+            torch.cuda.synchronize()
+        print(f'4-bit MatVec Time (Faster, FP16 in -> FP32 out): {(time.time() - tick) / COUNT:.6f} seconds')
+        del mat_int4_packed, scales_4bit_f32, zeros_4bit_f32, scales_4bit_f16, zeros_4bit_f16 # Free memory
+    else:
+        print("\nSkipping 4-bit kernel benchmark (CUDA module not found).")
+
+    print("\nKernel benchmark finished.")
+
+
 # TODO: perform packing on GPU
 def opt_pack3(model, quantizers):
     layers = find_layers(model)
@@ -452,6 +577,10 @@ if __name__ == '__main__':
         '--quiet', action='store_true',
         help='Reduce verbose logging during quantization and evaluation.'
     )
+    parser.add_argument(
+        '--benchmark-kernels', action='store_true',
+        help='Run low-level CUDA kernel benchmarks instead of model evaluation.'
+    )
 
     args = parser.parse_args()
 
@@ -471,6 +600,12 @@ if __name__ == '__main__':
     # Example: Replace print('Quantizing ...') with log_print('Quantizing ...') in opt_sequential
     # Example: Replace print(i) with log_print(i) in opt_eval
 
+    # --- Run Kernel Benchmark if requested ---
+    if args.benchmark_kernels:
+        benchmark_kernels(args, DEV)
+        exit() # Exit after kernel benchmark
+
+    # --- Main Logic ---
     if args.load:
         model = load_quant3(args.model, args.load)
     else:
