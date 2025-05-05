@@ -33,6 +33,17 @@ except ImportError as e:
     print(f"Could not import quantization layers: {e}")
     _quant_layers_available = False
 
+# Import other quantizers for verification loop
+try:
+    from quant import get_quantizer, QuantileQuantizer, LloydMaxQuantizer, LogQuantizer, KMeansQuantizer, APoTQuantizer
+    # MinMaxQuantizer is already imported as Quantizer
+    _other_quantizers_available = True
+    print("Successfully imported other quantizer types for verification.")
+except ImportError as e:
+    print(f"Could not import other quantizer types: {e}")
+    _other_quantizers_available = False
+
+
 torch.backends.cuda.matmul.allow_tf32 = False
 torch.backends.cudnn.allow_tf32 = False
 
