@@ -20,8 +20,8 @@ __global__ void VecQuant4MatMulKernel_half(
     const c10::Half* __restrict__ vec, // Use c10::Half
     const    int* __restrict__ mat,
            float* __restrict__ mul, // Output is still float due to float accumulation
-    const   half* __restrict__ scales,
-    const   half* __restrict__ zeros, // Note: This is zero_point * scale
+    const c10::Half* __restrict__ scales, // <<< Use c10::Half
+    const c10::Half* __restrict__ zeros, // <<< Use c10::Half
     int height, // Packed height (orig_height / 8)
     int width
 );
@@ -84,8 +84,8 @@ void vecquant4matmul_launcher(
           static_cast<const c10::Half*>(vec_ptr), // Cast void* to c10::Half*
           mat_ptr,
           mul_ptr, // Output is still float
-          static_cast<const half*>(scales_ptr), // Cast void*
-          static_cast<const half*>(zeros_ptr),  // Cast void*
+          static_cast<const c10::Half*>(scales_ptr), // <<< Cast void* to c10::Half*
+          static_cast<const c10::Half*>(zeros_ptr),  // <<< Cast void* to c10::Half*
           height, width
       );
   } else {
