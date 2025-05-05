@@ -64,8 +64,9 @@ void vecquant4matmul(
   const int expected_packed_height = (vec_features + 7) / 8;
   TORCH_CHECK(height == expected_packed_height, "Packed matrix height mismatch");
   TORCH_CHECK(width == mul.size(-1), "Matrix width vs mul features mismatch");
-  TORCH_CHECK(width == scales.size(-1), "Matrix width vs scales features mismatch");
-  TORCH_CHECK(width == zeros.size(-1), "Matrix width vs zeros features mismatch");
+  // Check scales/zeros are 1D and match width
+  TORCH_CHECK(scales.dim() == 1 && width == scales.size(0), "Scales must be 1D and match matrix width");
+  TORCH_CHECK(zeros.dim() == 1 && width == zeros.size(0), "Zeros must be 1D and match matrix width");
 
   // Get current CUDA stream
   cudaStream_t stream = at::cuda::getCurrentCUDAStream();
@@ -120,8 +121,9 @@ void vecquant4matmul_faster(
   TORCH_CHECK(vec_features % 2 == 0, "vec features must be divisible by 2 for faster kernel");
   TORCH_CHECK(height == expected_packed_height, "Packed matrix height mismatch");
   TORCH_CHECK(width == mul.size(-1), "Matrix width vs mul features mismatch");
-  TORCH_CHECK(width == scales.size(-1), "Matrix width vs scales features mismatch");
-  TORCH_CHECK(width == zeros.size(-1), "Matrix width vs zeros features mismatch");
+  // Check scales/zeros are 1D and match width
+  TORCH_CHECK(scales.dim() == 1 && width == scales.size(0), "Scales must be 1D and match matrix width for faster kernel");
+  TORCH_CHECK(zeros.dim() == 1 && width == zeros.size(0), "Zeros must be 1D and match matrix width for faster kernel");
 
   // Get current CUDA stream
   cudaStream_t stream = at::cuda::getCurrentCUDAStream();

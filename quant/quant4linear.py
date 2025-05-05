@@ -131,11 +131,11 @@ class Quant4Linear(nn.Module):
         else:
             # Standard kernel uses input type for output (unless input is FP16, then output is FP16)
             # Let's make output FP32 for consistency if input is FP16, otherwise match input type
-            out_dtype = torch.float32 if x_padded.dtype == torch.float16 else x_padded.dtype
+            out_dtype = torch.float32 # Standard kernel now always outputs float
             out = torch.zeros((x_padded.shape[0], self.outfeatures), dtype=out_dtype, device=x.device)
-            # Ensure scales/zeros match input type for standard kernel
-            scales = self.scales.to(x_padded.dtype)
-            zeros = self.zeros.to(x_padded.dtype) # zero_point * scale
+            # Ensure scales/zeros match input type for standard kernel and are 1D
+            scales = self.scales.to(x_padded.dtype).squeeze() # Squeeze last dim
+            zeros = self.zeros.to(x_padded.dtype).squeeze()  # Squeeze last dim
             quant_cuda_4bit.vecquant4matmul(x_padded, self.qweight, out, scales, zeros)
 
         # Add bias and reshape
