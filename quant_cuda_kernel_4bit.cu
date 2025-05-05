@@ -5,14 +5,23 @@
 #include <cuda_fp16.h>
 #include <c10/cuda/CUDAException.h> // For C10_CUDA_KERNEL_LAUNCH_CHECK
 
-// Forward declarations
-template <typename scalar_t>
-__global__ void VecQuant4MatMulKernel(
-    const  scalar_t* __restrict__ vec,
-    const       int* __restrict__ mat,
-           scalar_t* __restrict__ mul,
-    const  scalar_t* __restrict__ scales,
-    const  scalar_t* __restrict__ zeros, // Note: This is zero_point * scale
+// Forward declarations for explicit float and half kernels
+__global__ void VecQuant4MatMulKernel_float(
+    const  float* __restrict__ vec,
+    const    int* __restrict__ mat,
+           float* __restrict__ mul,
+    const  float* __restrict__ scales,
+    const  float* __restrict__ zeros, // Note: This is zero_point * scale
+    int height, // Packed height (orig_height / 8)
+    int width
+);
+
+__global__ void VecQuant4MatMulKernel_half(
+    const   half* __restrict__ vec,
+    const    int* __restrict__ mat,
+           float* __restrict__ mul, // Output is still float due to float accumulation
+    const   half* __restrict__ scales,
+    const   half* __restrict__ zeros, // Note: This is zero_point * scale
     int height, // Packed height (orig_height / 8)
     int width
 );
@@ -77,24 +86,36 @@ void vecquant4matmul_cuda(
   // Dispatch based on input type, but output `mul` must be float.
   TORCH_CHECK(mul.scalar_type() == torch::kFloat32, "mul tensor must be Float32 for vecquant4matmul_cuda");
 
-  // Restrict dispatch to only float and half for the standard kernel input
-  AT_DISPATCH_FLOATING_TYPES_AND(at::ScalarType::Half, vec.scalar_type(), "vecquant4matmul_cuda", ([&] {
-      // Ensure scales/zeros match the input vector type for the kernel call
-      auto scales_casted = scales.to(vec.scalar_type());
-      auto zeros_casted = zeros.to(vec.scalar_type());
-
-      VecQuant4MatMulKernel<<<blocks, threads>>>(
-        vec.data_ptr<scalar_t>(),
-        mat.data_ptr<int>(),
-        mul.data_ptr<float>(), // Output is always float*
-        scales_casted.data_ptr<scalar_t>(),
-        zeros_casted.data_ptr<scalar_t>(),
-        height, // Packed height
-        width
+  // Explicitly call float or half kernel based on input type
+  if (vec.scalar_type() == torch::kFloat32) {
+      // Ensure scales/zeros are also float
+      auto scales_f32 = scales.to(torch::kFloat32);
+      auto zeros_f32 = zeros.to(torch::kFloat32);
+      VecQuant4MatMulKernel_float<<<blocks, threads>>>(
+          vec.data_ptr<float>(),
+          mat.data_ptr<int>(),
+          mul.data_ptr<float>(),
+          scales_f32.data_ptr<float>(),
+          zeros_f32.data_ptr<float>(),
+          height, width
       );
-    })
-  );
-   C10_CUDA_KERNEL_LAUNCH_CHECK(); // Check for kernel launch errors
+  } else if (vec.scalar_type() == torch::kFloat16) {
+      // Ensure scales/zeros are also half
+      auto scales_f16 = scales.to(torch::kFloat16);
+      auto zeros_f16 = zeros.to(torch::kFloat16);
+      VecQuant4MatMulKernel_half<<<blocks, threads>>>(
+          vec.data_ptr<half>(),
+          mat.data_ptr<int>(),
+          mul.data_ptr<float>(), // Output is still float
+          scales_f16.data_ptr<half>(),
+          zeros_f16.data_ptr<half>(),
+          height, width
+      );
+  } else {
+      TORCH_CHECK(false, "vecquant4matmul_cuda supports only Float32 or Float16 input types");
+  }
+
+  C10_CUDA_KERNEL_LAUNCH_CHECK(); // Check for kernel launch errors
 }
 
 void vecquant4matmul_faster_cuda(
@@ -152,14 +173,66 @@ void vecquant4matmul_faster_cuda(
 
 // --- Kernel Implementations ---
 
-// Kernel modified: Accumulates in float, requires float output buffer `mul`
-template <typename scalar_t>
-__global__ void VecQuant4MatMulKernel(
-    const  scalar_t* __restrict__ vec,
-    const       int* __restrict__ mat,
-           float*    __restrict__ mul, // Output buffer MUST be float
-    const  scalar_t* __restrict__ scales,
-    const  scalar_t* __restrict__ zeros, // zero_point * scale
+// Explicit kernel for FLOAT input
+__global__ void VecQuant4MatMulKernel_float(
+    const  float* __restrict__ vec,
+    const    int* __restrict__ mat,
+           float* __restrict__ mul,
+    const  float* __restrict__ scales,
+    const  float* __restrict__ zeros, // zero_point * scale
+    int height, // Packed height (orig_height / 8)
+    int width
+) {
+    // Calculate the column index for this thread
+    const int col = blockIdx.y * BLOCKWIDTH_4BIT + threadIdx.x;
+
+    // Bounds check for column
+    if (col >= width) return;
+
+    // Calculate the starting row index for this block
+    const int row_base = blockIdx.x * BLOCKHEIGHT_4BIT;
+
+    // Load scale and zero for the current column
+    const float scale = scales[col];
+    const float zero = zeros[col]; // This is zero_point * scale
+
+    // Accumulator for the result - ALWAYS use float for accumulation
+    float res = 0.0f;
+
+    // Loop over the packed rows assigned to this block
+    for (int packed_row_offset = 0; packed_row_offset < BLOCKHEIGHT_4BIT; ++packed_row_offset) {
+        const int packed_row = row_base + packed_row_offset;
+        // Bounds check for row (important if height is not perfectly divisible by BLOCKHEIGHT_4BIT)
+        if (packed_row >= height) continue;
+
+        const int original_row_base = packed_row * 8; // Base row in the original un-packed matrix
+
+        // Load the packed 32-bit integer containing 8 x 4-bit weights
+        const unsigned int packed_val = as_unsigned(mat[packed_row * width + col]);
+
+        // Unpack 8 values and multiply-accumulate with corresponding vector elements
+        #pragma unroll
+        for (int i = 0; i < 8; ++i) {
+            // Extract the i-th 4-bit value
+            float val = static_cast<float>((packed_val >> (i * 4)) & 0xF);
+            // Dequantize: scale * quantized_value - zero_point * scale
+            float dequant_val = scale * val - zero;
+            // Multiply with corresponding vector element and accumulate
+            res += dequant_val * vec[original_row_base + i];
+        }
+    }
+
+    // Atomically add the partial result to the output vector element
+    atomicAdd(&mul[col], res);
+}
+
+// Explicit kernel for HALF input
+__global__ void VecQuant4MatMulKernel_half(
+    const   half* __restrict__ vec,
+    const    int* __restrict__ mat,
+           float* __restrict__ mul, // Output buffer MUST be float
+    const   half* __restrict__ scales,
+    const   half* __restrict__ zeros, // zero_point * scale
     int height, // Packed height (orig_height / 8)
     int width
 ) {
@@ -174,8 +247,8 @@ __global__ void VecQuant4MatMulKernel(
     const int row_base = blockIdx.x * BLOCKHEIGHT_4BIT;
 
     // Load scale and zero for the current column
-    const scalar_t scale = scales[col];
-    const scalar_t zero = zeros[col]; // This is zero_point * scale
+    const half scale = scales[col];
+    const half zero = zeros[col]; // This is zero_point * scale
 
     // Accumulator for the result - ALWAYS use float for accumulation
     float res = 0.0f;
@@ -195,17 +268,17 @@ __global__ void VecQuant4MatMulKernel(
         // This loop should be unrolled by the compiler
         #pragma unroll
         for (int i = 0; i < 8; ++i) {
-            // Extract the i-th 4-bit value
-            scalar_t val = static_cast<scalar_t>((packed_val >> (i * 4)) & 0xF);
-            // Dequantize: scale * quantized_value - zero_point * scale
-            scalar_t dequant_val = scale * val - zero;
-            // Multiply with corresponding vector element and accumulate
+            // Extract the i-th 4-bit value and convert to half
+            half val = __int2half_rn((packed_val >> (i * 4)) & 0xF);
+            // Dequantize: scale * quantized_value - zero_point * scale (in half precision)
+            half dequant_val_h = scale * val - zero;
+            // Multiply with corresponding vector element (half) and accumulate in float
             // Ensure we don't read past the end of the input vector if padding occurred
             // Note: The Python code pads the input vector, so this check might be redundant
             // if padding is guaranteed, but it's safer.
             // int vec_idx = original_row_base + i;
             // if (vec_idx < total_input_features) { // Need total_input_features passed or calculated
-                 res += dequant_val * vec[original_row_base + i];
+                 res += __half2float(dequant_val_h) * __half2float(vec[original_row_base + i]);
             // }
         }
     }

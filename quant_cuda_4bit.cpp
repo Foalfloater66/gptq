@@ -3,10 +3,13 @@
 #include <c10/cuda/CUDAGuard.h>
 
 // Declare the functions defined in quant_cuda_kernel_4bit.cu
+// This is the main dispatcher function in the .cu file
 void vecquant4matmul_cuda(
   torch::Tensor vec, torch::Tensor mat, torch::Tensor mul,
   torch::Tensor scales, torch::Tensor zeros
 );
+
+// This is the faster kernel, declaration remains the same
 
 void vecquant4matmul_faster_cuda(
   torch::Tensor vec, torch::Tensor mat, torch::Tensor mul,
@@ -27,9 +30,7 @@ void vecquant4matmul(
   TORCH_CHECK(mat.scalar_type() == torch::kInt32, "mat must be an Int32 tensor");
   // Enforce float32 output for the standard kernel, as it now always accumulates in float
   TORCH_CHECK(mul.scalar_type() == torch::kFloat32, "mul tensor must be Float32 for vecquant4matmul");
-  // Enforce float or half input for the standard kernel
-  TORCH_CHECK(vec.scalar_type() == torch::kFloat32 || vec.scalar_type() == torch::kFloat16,
-              "vec tensor must be Float32 or Float16 for vecquant4matmul");
+  // Input type check (float/half) is now handled within vecquant4matmul_cuda
   // Add more shape/dimension checks if needed
   vecquant4matmul_cuda(vec, mat, mul, scales, zeros);
 }

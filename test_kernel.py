@@ -142,17 +142,18 @@ if _quant_cuda_4bit_available:
         # Example using FP32 input/output
         quant_cuda_4bit.vecquant4matmul(vec_f32_4b, mat_int4_packed, mul_f32, scales_4bit, zeros_4bit)
         torch.cuda.synchronize()
-    print(f'4-bit MatVec Time (FP32): {(time.time() - tick) / COUNT:.6f} seconds')
+    print(f'4-bit MatVec Time (FP32 in -> FP32 out): {(time.time() - tick) / COUNT:.6f} seconds')
 
-    # Example using FP16 input/output
-    mul_fp16_4b = torch.zeros((1, N_BENCH), device=DEV, dtype=DTYPE_FP16)
-    scales_4bit_h = scales_4bit.half()
+    # Example using FP16 input -> FP32 output (standard kernel)
+    mul_f32.zero_() # Use the FP32 output buffer
+    scales_4bit_h = scales_4bit.half() # Kernel expects half scales/zeros for half input
     zeros_4bit_h = zeros_4bit.half()
     tick = time.time()
     for _ in range(COUNT):
-        quant_cuda_4bit.vecquant4matmul(vec_fp16_4b, mat_int4_packed, mul_fp16_4b, scales_4bit_h, zeros_4bit_h)
+        # Input vec is FP16, scales/zeros are FP16, output mul is FP32
+        quant_cuda_4bit.vecquant4matmul(vec_fp16_4b, mat_int4_packed, mul_f32, scales_4bit_h, zeros_4bit_h)
         torch.cuda.synchronize()
-    print(f'4-bit MatVec Time (FP16): {(time.time() - tick) / COUNT:.6f} seconds')
+    print(f'4-bit MatVec Time (FP16 in -> FP32 out): {(time.time() - tick) / COUNT:.6f} seconds')
 
 
     # Benchmark faster 4-bit kernel (requires FP16 input, FP32 output)
@@ -270,19 +271,17 @@ if _quant_layers_available and _quant_cuda_4bit_available and _other_quantizers_
 
             # 2. Kernel output (Standard, Float input -> Float output)
             out_kern = qlayer_4bit(vec)
-            print(f'Kernel Std (F32):         {out_kern.abs().mean().item():.5f} (mean abs val)')
-            print(f'--> Diff (Sim Affine vs Kern Std): {(out_sim - out_kern).abs().mean().item():.8f}')
+            print(f'Kernel Std (F32 in -> F32 out): {out_kern.abs().mean().item():.5f} (mean abs val)')
+            print(f'--> Diff (Sim Affine vs Kern Std F32): {(out_sim - out_kern).abs().mean().item():.8f}')
 
-            # 3. Kernel output (Standard, Half input -> Half output)
-            #    Requires casting input and potentially adjusting layer params if needed
-            qlayer_4bit_fp16 = Quant4Linear(layer.in_features, layer.out_features, faster=False)
-            # Pack using half-precision affine scale/zero derived earlier
-            qlayer_4bit_fp16.pack(layer, affine_scale.half(), affine_zero.half())
-            qlayer_4bit_fp16 = qlayer_4bit_fp16.to(DEV)
-            out_kern_fp16 = qlayer_4bit_fp16(vec.half())
-            print(f'Kernel Std (F16):         {out_kern_fp16.abs().mean().item():.5f} (mean abs val)')
-            # Compare FP16 kernel output to FP16 simulated output
-            print(f'--> Diff (Sim Affine vs Kern F16): {(out_sim.half() - out_kern_fp16).abs().mean().item():.8f}')
+            # 3. Kernel output (Standard, Half input -> Float output)
+            #    The standard kernel now always outputs float.
+            #    We still use the qlayer_4bit instance packed with float params,
+            #    but call it with a half input vector.
+            out_kern_f16_in = qlayer_4bit(vec.half()) # Input is half, output is float
+            print(f'Kernel Std (F16 in -> F32 out): {out_kern_f16_in.abs().mean().item():.5f} (mean abs val)')
+            # Compare float kernel output to float simulated output
+            print(f'--> Diff (Sim Affine vs Kern Std F16in): {(out_sim - out_kern_f16_in).abs().mean().item():.8f}')
 
 
             # 4. Kernel output (Faster, Half input -> Float output)
@@ -296,7 +295,7 @@ if _quant_layers_available and _quant_cuda_4bit_available and _other_quantizers_
 
         # Clean up memory (optional, but good practice in a loop)
         del layer, quantizer_specific, quantized_weights_specific, affine_quantizer
-        del layer_sim, qlayer_4bit, qlayer_4bit_faster, qlayer_4bit_fp16
+        del layer_sim, qlayer_4bit, qlayer_4bit_faster # Removed qlayer_4bit_fp16
         torch.cuda.empty_cache()
 
 else:
