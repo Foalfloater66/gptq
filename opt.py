@@ -5,6 +5,8 @@ import os   # <-- Add import
 import torch
 import torch.nn as nn
 import math # Add math import
+import json # <-- Add import
+import os   # <-- Add import
 
 from gptq import *
 from modelutils import *
@@ -95,10 +97,11 @@ def opt_sequential(model, dataloader, quantizer_name, dev):
 
     print('Ready.')
 
-
-    quantizer = get_quantizer(quantizer_name)
-    quantizers = {}
+    # Get the constructor for the chosen quantizer
+    SpecificQuantizerClass = get_quantizer(quantizer_name)
+    quantizers_for_packing = {} # Store affine params (scale, zero) needed for packing
     for i in range(len(layers)):
+        log_print(f"\nProcessing layer {i}")
         layer = layers[i].to(dev)
 
         subset = find_layers(layer)
@@ -123,13 +126,29 @@ def opt_sequential(model, dataloader, quantizer_name, dev):
             h.remove()
 
         for name in subset:
-            print(i, name)
-            print('Quantizing ...')
+            log_print(f"Layer {i}, Module {name}")
+            log_print('Running GPTQ + Quantization...')
+            # GPTQ uses the specific quantizer internally via gptq[name].quantizer
             gptq[name].fasterquant(
                 percdamp=args.percdamp, groupsize=args.groupsize, actorder=args.act_order, static_groups=args.static_groups
             )
-            quantizers['model.decoder.layers.%d.%s' % (i, name)] = gptq[name].quantizer
+
+            # --- Crucial Step: Get Affine Params for Packing ---
+            # The weight in subset[name] is now quantized by the specific method.
+            # We need to find the best affine representation (scale/zero) for this quantized weight.
+            W_quant = subset[name].weight.data.clone()
+            affine_quantizer = MinMaxQuantizer() # Use MinMax to find affine params
+            affine_quantizer.configure(args.wbits, perchannel=True, sym=args.sym)
+            affine_quantizer.find_params(W_quant, weight=True)
+
+            # Store the affine scale and zero point for packing later
+            layer_name_str = f'model.decoder.layers.{i}.{name}'
+            quantizers_for_packing[layer_name_str] = (affine_quantizer.scale.cpu(), affine_quantizer.zero.cpu())
+            # ----------------------------------------------------
+
             gptq[name].free()
+
+        # Run forward pass again to update output states (important for sequential application)
         for j in range(args.nsamples):
             outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask)[0]
 
@@ -141,8 +160,9 @@ def opt_sequential(model, dataloader, quantizer_name, dev):
         inps, outs = outs, inps
 
     model.config.use_cache = use_cache
-    
-    return quantizers
+
+    # Return the dictionary containing affine parameters needed for packing
+    return quantizers_for_packing
 
 @torch.no_grad()
 def opt_eval(model, testenc, dev):
@@ -376,6 +396,24 @@ def opt_pack3(model, quantizers):
     print('Done.')
     return model
 
+# Added function for 4-bit packing
+def opt_pack4(model, quantizers):
+    """Packs OPT model weights into 4-bit Quant4Linear layers."""
+    layers = find_layers(model)
+    layers = {n: layers[n] for n in quantizers}
+    make_quant4(model, quantizers, faster=args.faster_kernel) # Use make_quant4
+    qlayers = find_layers(model, [Quant4Linear]) # Find Quant4Linear layers
+    print('Packing 4-bit ...')
+    for name in qlayers:
+        print(name)
+        # Ensure scale/zero are on CPU before accessing .pack
+        # .pack expects integer zero points
+        scale, zero = quantizers[name]
+        qlayers[name].pack(layers[name], scale.to(qlayers[name].qweight.device), zero.to(qlayers[name].qweight.device))
+    print('Done.')
+    return model
+
+
 def load_quant3(model, checkpoint):
     from transformers import OPTConfig, OPTForCausalLM 
     config = OPTConfig.from_pretrained(model)
@@ -403,6 +441,40 @@ def load_quant3(model, checkpoint):
     print('Done.')
 
     return model
+
+# Added function for loading 4-bit model
+def load_quant4(model_path, checkpoint_path, faster=False):
+    """Loads a 4-bit quantized OPT model."""
+    from transformers import OPTConfig, OPTForCausalLM
+    config = OPTConfig.from_pretrained(model_path)
+    def noop(*args, **kwargs):
+        pass
+    torch.nn.init.kaiming_uniform_ = noop
+    torch.nn.init.uniform_ = noop
+    torch.nn.init.normal_ = noop
+
+    torch.set_default_dtype(torch.half)
+    transformers.modeling_utils._init_weights = False
+    torch.set_default_dtype(torch.half)
+    model = OPTForCausalLM(config)
+    torch.set_default_dtype(torch.float)
+    model = model.eval()
+    layers = find_layers(model)
+    # Exclude layers that are usually not quantized
+    for name in ['model.decoder.project_out', 'model.decoder.project_in', 'lm_head']:
+        if name in layers:
+            del layers[name]
+    make_quant4(model, layers, faster=faster) # Use make_quant4
+
+    print('Loading 4-bit model ...')
+    if checkpoint_path:
+         model.load_state_dict(torch.load(checkpoint_path))
+    else:
+         print("Warning: No checkpoint path provided for load_quant4. Model weights are initialized but not loaded.")
+    model.seqlen = model.config.max_position_embeddings
+    print('Done.')
+    return model
+
 
 def opt_multigpu(model, gpus):
     model.model.decoder.embed_tokens = model.model.decoder.embed_tokens.to(gpus[0])
@@ -579,12 +651,25 @@ if __name__ == '__main__':
         '--quiet', action='store_true',
         help='Reduce verbose logging during quantization and evaluation.'
     )
-    parser.add_argument(
-        '--benchmark-kernels', action='store_true',
-        help='Run low-level CUDA kernel benchmarks instead of model evaluation.'
-    )
+    # Remove benchmark-kernels, use --benchmark for model inference benchmark
+    # parser.add_argument(
+    #     '--benchmark-kernels', action='store_true',
+    #     help='Run low-level CUDA kernel benchmarks instead of model evaluation.'
+    # )
 
     args = parser.parse_args()
+
+    # --- Argument Validation ---
+    if args.wbits not in [3, 4, 16]:
+        raise ValueError("Only 3, 4, or 16 bits supported for --wbits with kernel evaluation.")
+    if args.wbits == 3 and not _quant_cuda_3bit_available:
+        raise ImportError("3-bit quantization requested, but 3-bit CUDA kernel not found. Build it first.")
+    if args.wbits == 4 and not _quant_cuda_4bit_available:
+        raise ImportError("4-bit quantization requested, but 4-bit CUDA kernel not found. Build it first.")
+    if args.load and args.save:
+        raise ValueError("Cannot specify both --load and --save")
+    if args.nearest:
+        print("Warning: --nearest flag is ignored when wbits < 16 in this script.")
 
     # Define DEV globally or pass args around if needed
     DEV = torch.device('cuda:0') # Assumes CUDA_VISIBLE_DEVICES handles mapping
@@ -603,14 +688,22 @@ if __name__ == '__main__':
     # Example: Replace print(i) with log_print(i) in opt_eval
 
     # --- Run Kernel Benchmark if requested ---
-    if args.benchmark_kernels:
-        benchmark_kernels(args, DEV)
-        exit() # Exit after kernel benchmark
+    # Removed kernel benchmark section, use --benchmark for model benchmark
 
     # --- Main Logic ---
     if args.load:
-        model = load_quant3(args.model, args.load)
+        log_print(f"Loading quantized model from: {args.load}")
+        if args.wbits == 3:
+            model = load_quant3(args.model, args.load)
+        elif args.wbits == 4:
+            # Pass faster_kernel flag to load_quant4
+            model = load_quant4(args.model, args.load, faster=args.faster_kernel)
+        else:
+            # Should not happen due to arg validation, but good practice
+             raise ValueError(f"Loading model with {args.wbits} bits not supported.")
+        model.eval() # Ensure model is in eval mode
     else:
+        # Load FP16 model for quantization or baseline eval
         model = get_opt(args.model)
         model.eval()
 
@@ -622,22 +715,38 @@ if __name__ == '__main__':
     if args.wbits < 16 and not args.nearest:
         tick = time.time()
         # Pass log_print or args if needed inside opt_sequential
-        quantizers = opt_sequential(model, dataloader, args.quantizer, DEV)
+        # quantizers now holds affine parameters (scale, zero)
+        affine_quantizers = opt_sequential(model, dataloader, args.quantizer, DEV)
         log_print(f"Quantization time: {time.time() - tick:.2f}s")
 
+        # Pack the model using the obtained affine quantizers
+        log_print("Packing model weights...")
+        if args.wbits == 3:
+            model = opt_pack3(model, affine_quantizers)
+        elif args.wbits == 4:
+            model = opt_pack4(model, affine_quantizers)
+        log_print("Packing complete.")
+
+    # --- Benchmarking ---
     if args.benchmark:
+        log_print(f"Benchmarking inference speed with {args.benchmark} tokens...")
         gpus = [torch.device('cuda:%d' % i) for i in range(torch.cuda.device_count())]
         if len(gpus) > 1:
             opt_multigpu(model, gpus)
         else:
             model = model.to(DEV)
         if args.benchmark:
+            # Use testloader for benchmark input for consistency? Or dataloader? Using dataloader.
             input_ids = next(iter(dataloader))[0][:, :args.benchmark]
+            # Ensure model is on the correct device(s) before benchmark
+            if len(gpus) > 1:
+                 opt_multigpu(model, gpus)
+            else:
+                 model = model.to(DEV)
             benchmark(model, input_ids, check=args.check)
-    if args.load:
-        exit()
+        log_print("Benchmarking complete.")
 
-    # Evaluation Loop
+    # --- Evaluation Loop ---
     evaluation_results = {}
     datasets = ['wikitext2', 'ptb', 'c4']
     if args.new_eval:
@@ -675,7 +784,21 @@ if __name__ == '__main__':
         except IOError as e:
             print(f"Error writing to output file {args.output_file}: {e}")
 
-
-    if args.save and quantizers is not None: # Ensure quantizers exist before packing
-        opt_pack3(model, quantizers)
+    # --- Save Model and Report Size ---
+    if args.save:
+        log_print(f"Saving quantized model to {args.save} ...")
+        # Ensure model is on CPU before saving to avoid GPU memory in file
+        model.cpu()
         torch.save(model.state_dict(), args.save)
+        log_print("Model saved.")
+        try:
+            file_size_mb = os.path.getsize(args.save) / (1024 * 1024)
+            log_print(f"Quantized model file size: {file_size_mb:.2f} MB")
+            # Optionally compare to FP16 size (requires loading original model again)
+            # model_fp16 = get_opt(args.model)
+            # torch.save(model_fp16.state_dict(), "temp_fp16.pt")
+            # fp16_size_mb = os.path.getsize("temp_fp16.pt") / (1024 * 1024)
+            # log_print(f"Original FP16 model file size: {fp16_size_mb:.2f} MB")
+            # os.remove("temp_fp16.pt")
+        except Exception as e:
+            log_print(f"Could not determine file size: {e}")
