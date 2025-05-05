@@ -26,10 +26,10 @@ setup(
         # extra_compile_args={'nvcc': ['-gencode=arch=compute_75,code=sm_75']} # Example for Turing
         # Force the CXX11 ABI to match PyTorch (likely built with new ABI)
         # Pass the flag to both the C++ compiler and via nvcc to its host compiler
-        # extra_compile_args={
-            # 'cxx': ['-D_GLIBCXX_USE_CXX11_ABI=1'],
-            # 'nvcc': ['-Xcompiler', '-D_GLIBCXX_USE_CXX11_ABI=1']
-        # }
+        extra_compile_args={
+            'cxx': ['-D_GLIBCXX_USE_CXX11_ABI=1', '-v'],
+            'nvcc': ['-Xcompiler', '-D_GLIBCXX_USE_CXX11_ABI=1', '-v']
+        }
     )],
     cmdclass={
         'build_ext': cpp_extension.BuildExtension # Use PyTorch's build extension command
