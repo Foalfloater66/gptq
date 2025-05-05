@@ -269,16 +269,18 @@ __global__ void VecQuant4MatMulKernel_half(
         #pragma unroll
         for (int i = 0; i < 8; ++i) {
             // Extract the i-th 4-bit value and convert to half
-            half val = __int2half_rn((packed_val >> (i * 4)) & 0xF);
-            // Dequantize: scale * quantized_value - zero_point * scale (in half precision)
-            half dequant_val_h = scale * val - zero;
+            half val_h = __int2half_rn((packed_val >> (i * 4)) & 0xF);
+            // Dequantize: scale * quantized_value - zero_point * scale
+            // Perform calculation in float due to disabled half operators
+            float dequant_val_f = __half2float(scale) * __half2float(val_h) - __half2float(zero);
             // Multiply with corresponding vector element (half) and accumulate in float
             // Ensure we don't read past the end of the input vector if padding occurred
             // Note: The Python code pads the input vector, so this check might be redundant
             // if padding is guaranteed, but it's safer.
             // int vec_idx = original_row_base + i;
             // if (vec_idx < total_input_features) { // Need total_input_features passed or calculated
-                 res += __half2float(dequant_val_h) * __half2float(vec[original_row_base + i]);
+                 // Accumulate the float dequantized value multiplied by the float converted vector element
+                 res += dequant_val_f * __half2float(vec[original_row_base + i]);
             // }
         }
     }
