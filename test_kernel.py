@@ -214,7 +214,13 @@ if _quant_layers_available and _quant_cuda_4bit_available and _other_quantizers_
         # 1. Instantiate and configure the specific quantizer
         quantizer_specific = QuantizerClass()
         # Configure for 4 bits. Add specific kwargs if needed (e.g., for LloydMax)
-        quantizer_specific.configure(bits=4, max_iterations=10) # Example: max_iterations for LloydMax
+        print(f"Configuring {name} quantizer...")
+        if name == "LloydMax":
+            quantizer_specific.configure(bits=4, max_iterations=10) # Pass max_iterations only for LloydMax
+        else:
+            # Most other quantizers likely only need 'bits'
+            # Add specific checks here if others need different args
+            quantizer_specific.configure(bits=4)
         print("Finding specific quantization parameters...")
         quantizer_specific.find_params(layer.weight.data, weight=True)
 
