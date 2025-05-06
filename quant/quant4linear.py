@@ -174,11 +174,15 @@ def make_quant4(module, names, name='', faster=False):
         name1 = name + '.' + attr if name != '' else attr
         if name1 in names and isinstance(tmp, nn.Linear):
             # Replace nn.Linear with Quant4Linear
-            # Unpack all three items: W_quant, scales, zeros_int
-            W_quant, scales, zeros_int = names[name1]
+            # Get the quantizer object for this layer
+            quantizer_obj = names[name1]
+            # Extract scale and zero (integer zero point) from the quantizer object
+            scales = quantizer_obj.scale
+            zeros_int = quantizer_obj.zero # Assumes quantizer stores integer zero point
+
             qlayer = Quant4Linear(tmp.in_features, tmp.out_features, faster=faster)
-            # Pass W_quant, scales, and zeros_int to pack
-            qlayer.pack(tmp, W_quant, scales, zeros_int)
+            # Pass the original layer (tmp), scales, and zeros_int to pack
+            qlayer.pack(tmp, scales, zeros_int)
             delattr(module, attr) # Remove original layer
             setattr(module, attr, qlayer) # Add new quantized layer
             print(f"Replaced {name1} with Quant4Linear ({'faster' if qlayer.faster else 'standard'})")
