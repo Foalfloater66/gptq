@@ -429,14 +429,13 @@ def opt_pack4(model, quantizers):
     print('Packing 4-bit ...')
     for name in qlayers:
         print(name)
-        # Get the quantizer object returned by opt_sequential
-        quantizer_obj = quantizers[name]
+        # Unpack the (scale, zero) tuple from the quantizers dictionary
+        scale_cpu, zero_cpu = quantizers[name]
         target_device = qlayers[name].qweight.device
 
-        # Extract scale and zero (integer zero point) from the quantizer object
-        # Ensure they are on the target device
-        scale = quantizer_obj.scale.to(target_device)
-        zero = quantizer_obj.zero.to(target_device) # Assumes quantizer stores integer zero point
+        # Ensure scale and zero (integer zero point) are on the target device
+        scale = scale_cpu.to(target_device)
+        zero = zero_cpu.to(target_device)
 
         # Get the corresponding original layer weights (needed by pack)
         # Note: layers[name] still holds the original nn.Linear instance
