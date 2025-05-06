@@ -43,12 +43,14 @@ class Quant4Linear(nn.Module):
             torch.zeros((packed_infeatures, outfeatures), dtype=torch.int32)
         )
 
-    def pack(self, linear, scales, zeros_float):
+    # Add W_quant to the function signature
+    def pack(self, linear, W_quant, scales, zeros_float):
         """
         Packs a FloatLinear layer into this Quant4Linear layer.
 
         Args:
-            linear (nn.Linear): The original FloatLinear layer.
+            linear (nn.Linear): The original FloatLinear layer (used for bias).
+            W_quant (torch.Tensor): The weights *already quantized* by the main algorithm (e.g., GPTQ).
             scales (torch.Tensor): The quantization scales (shape: [outfeatures, 1]).
             zeros_float (torch.Tensor): The floating-point zero points (shape: [outfeatures, 1]).
                                         These are the actual zero points, not zero_point * scale.
@@ -57,18 +59,20 @@ class Quant4Linear(nn.Module):
         if not _quant_cuda_4bit_available:
             raise ImportError("Cannot pack weights, CUDA 4-bit kernel not found.")
 
-        self.scales = scales.clone().to(linear.weight.device)
+        target_device = W_quant.device # Use device of quantized weights
+        self.scales = scales.clone().to(target_device)
         # Store zero_point * scale for the kernel
-        self.zeros = (zeros_float * self.scales).clone().to(linear.weight.device)
+        self.zeros = (zeros_float * self.scales).clone().to(target_device)
         if linear.bias is not None:
-            self.bias = linear.bias.clone().to(linear.weight.device)
+            self.bias = linear.bias.clone().to(target_device)
 
-        # Quantize weight to 4-bit range [0, 15] using the provided scales and zero points
-        # Q(x) = round(x / scale + zero_point)
-        weight_fp = linear.weight.data # Shape: (outfeatures, infeatures)
-        # Apply scales/zeros directly (shape (outfeatures, 1) broadcasts correctly with (outfeatures, infeatures))
-        weight_q = torch.round(weight_fp / self.scales + zeros_float)
+        # --- Convert W_quant to integer representation ---
+        # Use the provided scales and zero points to convert W_quant to integers [0, 15]
+        # W_quant should ideally already be close to the dequantized values: W_quant ≈ (weight_q - zeros_float) * scales
+        # So, weight_q ≈ W_quant / scales + zeros_float
+        weight_q = torch.round(W_quant / self.scales + zeros_float)
         weight_q = torch.clamp(weight_q, 0, 15).to(torch.int32) # Clamp to 4-bit unsigned range
+        # -------------------------------------------------
 
         # Transpose for packing: (outfeatures, infeatures) -> (infeatures, outfeatures)
         weight_q = weight_q.t().contiguous() # Shape: (infeatures, outfeatures)

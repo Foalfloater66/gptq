@@ -142,9 +142,10 @@ def opt_sequential(model, dataloader, quantizer_name, dev):
             affine_quantizer.configure(args.wbits, perchannel=True, sym=args.sym)
             affine_quantizer.find_params(W_quant, weight=True)
 
-            # Store the affine scale and zero point for packing later
+            # Store the final quantized weights (W_quant), affine scale, and zero point for packing later
             layer_name_str = f'model.decoder.layers.{i}.{name}'
-            quantizers_for_packing[layer_name_str] = (affine_quantizer.scale.cpu(), affine_quantizer.zero.cpu())
+            # Ensure W_quant is also moved to CPU to avoid holding GPU memory
+            quantizers_for_packing[layer_name_str] = (W_quant.cpu(), affine_quantizer.scale.cpu(), affine_quantizer.zero.cpu())
             # ----------------------------------------------------
 
             gptq[name].free()
@@ -407,10 +408,12 @@ def opt_pack4(model, quantizers):
     print('Packing 4-bit ...')
     for name in qlayers:
         print(name)
-        # Ensure scale/zero are on CPU before accessing .pack
-        # .pack expects integer zero points
-        scale, zero = quantizers[name]
-        qlayers[name].pack(layers[name], scale.to(qlayers[name].qweight.device), zero.to(qlayers[name].qweight.device))
+        # Ensure W_quant, scale, zero are on the correct device for pack
+        # .pack now expects the already quantized weights
+        W_quant, scale, zero = quantizers[name]
+        target_device = qlayers[name].qweight.device
+        # Pass the quantized weights directly to pack
+        qlayers[name].pack(layers[name], W_quant.to(target_device), scale.to(target_device), zero.to(target_device))
     print('Done.')
     return model
 
