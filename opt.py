@@ -728,6 +728,26 @@ if __name__ == '__main__':
             model = opt_pack4(model, affine_quantizers)
         log_print("Packing complete.")
 
+        # --- Convert non-quantized modules to FP32 ---
+        log_print("Converting remaining modules to FP32...")
+        model.model.decoder.embed_tokens = model.model.decoder.embed_tokens.float()
+        model.model.decoder.embed_positions = model.model.decoder.embed_positions.float()
+        if hasattr(model.model.decoder, 'project_in') and model.model.decoder.project_in:
+            model.model.decoder.project_in = model.model.decoder.project_in.float()
+        if hasattr(model.model.decoder, 'project_out') and model.model.decoder.project_out:
+            model.model.decoder.project_out = model.model.decoder.project_out.float()
+        if model.model.decoder.final_layer_norm is not None:
+             model.model.decoder.final_layer_norm = model.model.decoder.final_layer_norm.float()
+        # Convert LayerNorms within the OPTDecoderLayers that were not replaced
+        for layer in model.model.decoder.layers:
+             if isinstance(layer.self_attn_layer_norm, nn.LayerNorm):
+                  layer.self_attn_layer_norm = layer.self_attn_layer_norm.float()
+             if isinstance(layer.final_layer_norm, nn.LayerNorm):
+                  layer.final_layer_norm = layer.final_layer_norm.float()
+        model.lm_head = model.lm_head.float()
+        log_print("Module conversion complete.")
+
+
     # --- Benchmarking ---
     if args.benchmark:
         log_print(f"Benchmarking inference speed with {args.benchmark} tokens...")
