@@ -174,12 +174,9 @@ def make_quant4(module, names, name='', faster=False):
         name1 = name + '.' + attr if name != '' else attr
         if name1 in names and isinstance(tmp, nn.Linear):
             # Replace nn.Linear with Quant4Linear
-            # Get the quantizer object for this layer
-            quantizer_obj = names[name1]
-            # Extract scale and zero (integer zero point) from the quantizer object
-            scales = quantizer_obj.scale
-            zeros_int = quantizer_obj.zero # Assumes quantizer stores integer zero point
-
+            # Replace nn.Linear with Quant4Linear
+            # Unpack the (scales, zeros_int) tuple
+            scales, zeros_int = names[name1] # Zeros here should be integer zero point
             qlayer = Quant4Linear(tmp.in_features, tmp.out_features, faster=faster)
             # Pass the original layer (tmp), scales, and zeros_int to pack
             qlayer.pack(tmp, scales, zeros_int)

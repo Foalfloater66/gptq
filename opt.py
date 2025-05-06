@@ -140,12 +140,17 @@ def opt_sequential(model, dataloader, quantizer_name, dev):
             W_quant = subset[name].weight.data.clone()
             affine_quantizer = MinMaxQuantizer() # Use MinMax to find affine params
             affine_quantizer.configure(args.wbits, perchannel=True, sym=args.sym)
-            # Store the quantizer object used by GPTQ itself.
-            # It contains the scale/zero used to produce the final weights.
+            # --- Crucial Step: Get Affine Params for Packing ---
+            # The weight in subset[name] is now quantized by the specific method.
+            # We need to find the best affine representation (scale/zero) for this quantized weight.
+            W_quant = subset[name].weight.data.clone()
+            affine_quantizer = MinMaxQuantizer() # Use MinMax to find affine params
+            affine_quantizer.configure(args.wbits, perchannel=True, sym=args.sym)
+            affine_quantizer.find_params(W_quant, weight=True) # Find params for W_quant
+
+            # Store the affine scale and zero point for packing later
             layer_name_str = f'model.decoder.layers.{i}.{name}'
-            # Move quantizer state to CPU before storing? Check if needed.
-            # gptq[name].quantizer.cpu() # Might be needed if buffers are on GPU
-            quantizers_for_packing[layer_name_str] = gptq[name].quantizer
+            quantizers_for_packing[layer_name_str] = (affine_quantizer.scale.cpu(), affine_quantizer.zero.cpu())
             # ----------------------------------------------------
 
             gptq[name].free()
