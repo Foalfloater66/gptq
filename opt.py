@@ -140,12 +140,12 @@ def opt_sequential(model, dataloader, quantizer_name, dev):
             W_quant = subset[name].weight.data.clone()
             affine_quantizer = MinMaxQuantizer() # Use MinMax to find affine params
             affine_quantizer.configure(args.wbits, perchannel=True, sym=args.sym)
-            affine_quantizer.find_params(W_quant, weight=True)
-
-            # Store the final quantized weights (W_quant), affine scale, and zero point for packing later
+            # Store the quantizer object used by GPTQ itself.
+            # It contains the scale/zero used to produce the final weights.
             layer_name_str = f'model.decoder.layers.{i}.{name}'
-            # Ensure W_quant is also moved to CPU to avoid holding GPU memory
-            quantizers_for_packing[layer_name_str] = (W_quant.cpu(), affine_quantizer.scale.cpu(), affine_quantizer.zero.cpu())
+            # Move quantizer state to CPU before storing? Check if needed.
+            # gptq[name].quantizer.cpu() # Might be needed if buffers are on GPU
+            quantizers_for_packing[layer_name_str] = gptq[name].quantizer
             # ----------------------------------------------------
 
             gptq[name].free()
@@ -408,12 +408,22 @@ def opt_pack4(model, quantizers):
     print('Packing 4-bit ...')
     for name in qlayers:
         print(name)
-        # Ensure W_quant, scale, zero are on the correct device for pack
-        # .pack now expects the already quantized weights
-        W_quant, scale, zero = quantizers[name]
+        # Get the quantizer object returned by opt_sequential
+        quantizer_obj = quantizers[name]
         target_device = qlayers[name].qweight.device
-        # Pass the quantized weights directly to pack
-        qlayers[name].pack(layers[name], W_quant.to(target_device), scale.to(target_device), zero.to(target_device))
+
+        # Extract scale and zero (integer zero point) from the quantizer object
+        # Ensure they are on the target device
+        scale = quantizer_obj.scale.to(target_device)
+        zero = quantizer_obj.zero.to(target_device) # Assumes quantizer stores integer zero point
+
+        # Get the corresponding original layer weights (needed by pack)
+        # Note: layers[name] still holds the original nn.Linear instance
+        original_linear_layer = layers[name]
+
+        # Pack using the original layer, the scale/zero from the GPTQ quantizer
+        # The pack method will internally re-quantize the original weights using these exact params
+        qlayers[name].pack(original_linear_layer, scale, zero)
     print('Done.')
     return model
 
