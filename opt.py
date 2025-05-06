@@ -772,6 +772,12 @@ if __name__ == '__main__':
     datasets = ['wikitext2', 'ptb', 'c4']
     if args.new_eval:
       datasets = ['wikitext2', 'ptb-new', 'c4-new']
+
+    # Ensure model is fully on the primary device before evaluation
+    log_print(f"Moving model to primary device {DEV} for evaluation...")
+    model.to(DEV)
+    log_print("Model moved.")
+
     for dataset in datasets:
         dataloader, testloader = get_loaders(
             dataset, seed=args.seed, model=args.model, seqlen=model.seqlen
