@@ -66,7 +66,8 @@ class Quant4Linear(nn.Module):
         # Quantize weight to 4-bit range [0, 15] using the provided scales and zero points
         # Q(x) = round(x / scale + zero_point)
         weight_fp = linear.weight.data # Shape: (outfeatures, infeatures)
-        weight_q = torch.round(weight_fp / self.scales.t() + zeros_float.t()) # Transpose scales/zeros
+        # Apply scales/zeros directly (shape (outfeatures, 1) broadcasts correctly with (outfeatures, infeatures))
+        weight_q = torch.round(weight_fp / self.scales + zeros_float)
         weight_q = torch.clamp(weight_q, 0, 15).to(torch.int32) # Clamp to 4-bit unsigned range
 
         # Transpose for packing: (outfeatures, infeatures) -> (infeatures, outfeatures)
