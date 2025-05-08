@@ -58,8 +58,18 @@ class GPTQ:
         self.H += inp.matmul(inp.t())
 
     def fasterquant(
-        self, blocksize=128, percdamp=.01, groupsize=-1, actorder=False, static_groups=False
+        self, blocksize=128, percdamp=.01, groupsize=-1, actorder=False, static_groups=False,
+        log_error_scale_power=0.0 # Add new parameter with default
     ):
+        # Import LogQuantizer locally to check its type without circular dependency issues
+        # (assuming logquantizer.py is in the same directory or accessible)
+        # This might need adjustment based on your project structure.
+        # A cleaner way might be to pass a flag or use a property on the quantizer object itself.
+        try:
+            from quant.logquantizer import LogQuantizer
+        except ImportError:
+            LogQuantizer = None # Handle case where it might not be available
+
         W = self.layer.weight.data.clone()
         if isinstance(self.layer, nn.Conv2d):
             W = W.flatten(1)
@@ -127,13 +137,35 @@ class GPTQ:
                             idx = perm[idx]
                         self.quantizer = groups[idx // groupsize]
 
-                q = self.quantizer.quantize(w.unsqueeze(1)).flatten()
+                # Unpack quantized value and exponent if LogQuantizer, else just get q
+                quantized_output = self.quantizer.quantize(w.unsqueeze(1))
+                if LogQuantizer is not None and isinstance(self.quantizer, LogQuantizer):
+                    q, exponent = quantized_output
+                    q = q.flatten()
+                    exponent = exponent.flatten() # Flatten exponent too
+                else:
+                    q = quantized_output.flatten()
+                    exponent = None # No exponent for other quantizers
+
                 Q1[:, i] = q
                 Losses1[:, i] = (w - q) ** 2 / d ** 2
 
                 err1 = (w - q) / d
-                W1[:, i:] -= err1.unsqueeze(1).matmul(Hinv1[i, i:].unsqueeze(0))
-                Err1[:, i] = err1 
+
+                # Conditionally scale the error if using LogQuantizer and power is non-zero, now using exponent
+                if exponent is not None and log_error_scale_power != 0.0:
+                    # Scale based on the absolute value of the exponent + 1
+                    # Adding 1 avoids issues with exponent 0 and keeps scaling monotonic
+                    exponent_dev = exponent.to(err1.device) # Ensure device match
+                    scaling_factor = (torch.abs(exponent_dev) + 1.0) ** (-log_error_scale_power)
+                    err1_scaled = err1 * scaling_factor
+                    # Use scaled error for the update
+                    W1[:, i:] -= err1_scaled.unsqueeze(1).matmul(Hinv1[i, i:].unsqueeze(0))
+                    Err1[:, i] = err1_scaled # Store the scaled error
+                else:
+                    # Use original error for other quantizers or if scaling is disabled
+                    W1[:, i:] -= err1.unsqueeze(1).matmul(Hinv1[i, i:].unsqueeze(0))
+                    Err1[:, i] = err1 # Store the original error
 
             Q[:, i1:i2] = Q1
             Losses[:, i1:i2] = Losses1 / 2
