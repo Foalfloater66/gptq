@@ -1,17 +1,33 @@
-# GPTQ
+# Non-Uniform Extended GPTQ
+This repository contains the code for the COMP0252 Group Coursework Report "On the Compatibility of Non-Uniform Quantization Schemes with OPTQ-Based LLM Compression".
+It extends the code for the ICLR 2023 paper [GPTQ: Accurate Post-training Compression for Generative Pretrained Transformers](https://arxiv.org/abs/2210.17323). 
+To refer to the original repository, see [GPTQ](https://github.com/IST-DASLab/gptq).
 
-This repository contains the code for the ICLR 2023 paper [GPTQ: Accurate Post-training Compression for Generative Pretrained Transformers](https://arxiv.org/abs/2210.17323). 
-The current release includes the following features:
+The extension includes the following features:
+* Efficient implementations of non-uniform quantization methods: `quant/quantilequantizer.py`, `quant/logquantizer.py`, `quant/lloydmaxquant.py`, `quant/kmeansquantizer.py`, `quant/apotquantizer.py`
+* Extension of OPT and BLOOM model family compression to include different quantization methods: `opt.py`, `bloom.py`
+* General custom CUDA 11.7 kernels for 4-bit quantization: `quant_cuda_4bit.cpp`, `quant_cuda_kernel_4bit.cu`, `setup_cuda_4bit.py`
+* Special logarithmic variant of the custom CUDA 11.7 kernels for 4-bit quantization: `logmatvec_cuda.cpp`, `logmatvec_cuda_kernel.cu`, `setup_logmatvec_cuda.py`
+
+
+<!-- The current release includes the following features:
 
 * An efficient implementation of the GPTQ algorithm: `gptq.py`
 * Compressing all models from the OPT and BLOOM families to 2/3/4 bits, including weight grouping: `opt.py`, `bloom.py`, `zeroShot/`
 * Evaluating the perplexity of quantized models on several language generation tasks: `opt.py`, `bloom.py`
 * Evaluating the performance of quantized models on several ZeroShot tasks: `zeroShot/`
 * A 3-bit quantized matrix full-precision vector product CUDA kernel: `quant_cuda_kernel.cu`, `quant_cuda.cpp`, `setup_cuda.py`
-* Benchmarking code for individual matrix-vector products and for language generation with quantized models: `test_kernel.py`, `opt.py`
+* Benchmarking code for individual matrix-vector products and for language generation with quantized models: `test_kernel.py`, `opt.py` -->
 
-## New Features
+## Extended Features
+Update May 2025:
+* Added `--quantizer` options which can be used to use different weight quantization methods with OPTQ. 
+The new methods are LloydMax, APoT, Quantile, K-Means, and Logarithmic.
+*
 
+<br>
+
+# GPTQ Features
 Update July 2023:
 
 * Added `--static-groups` options which determines all group-grids in advance rather than dynamically during quantization, which has the effect that `--act-order` does not require any inference changes (that may cause slowdown) when used together with this option.
