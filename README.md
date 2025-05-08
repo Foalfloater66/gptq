@@ -57,13 +57,12 @@ The `--act-order` heuristic also dramatically improves accuracy on the OPT-66B o
 
 ## Dependencies
 
-* `torch`: tested on v1.10.1+cu111
-* `transformers`: tested on v4.21.2 (the LLaMa integration currently requires a main install from source and `sentencepiece`)
-* `datasets`: tested on v1.17.0
+* `torch`: tested on v1.13.0+cu117
+* `transformers`: tested on v4.21.2
+* `datasets`: tested on v3.5.1
 * (to run 3-bit kernels: setup for compiling PyTorch CUDA extensions, see also https://pytorch.org/tutorials/advanced/cpp_extension.html, tested on CUDA 11.4)
 
-All experiments were run on a single 80GB NVIDIA A100. However, most experiments will work on a GPU with a lot less memory as well.
-
+All experiments were run on a RTX Quadro 6000.
 ## Language Generation
 
 ### OPT
