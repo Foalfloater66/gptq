@@ -5,126 +5,7 @@ import torch.nn as nn
 
 from gptq import *
 from modelutils import *
-# Import necessary quantizers and the custom kernel
-from quant import get_quantizer, LogQuantizer
-import logmatvec_cuda # Import the compiled custom kernel
-import copy # For deepcopying model if needed
-
-
-# --- Custom Layer Definition ---
-
-class LogMatVecPackedLinear(nn.Module):
-    # Needs ACT_BITS defined globally or passed in
-    # Let's define it here for now, assuming 8-bit activations
-    ACT_BITS = 8
-
-    def __init__(self, in_features, out_features):
-        super().__init__()
-        if in_features % 2 != 0:
-             raise ValueError("Input features must be even for 4-bit packing.")
-        self.in_features = in_features
-        self.out_features = out_features
-
-        # Buffers to store packed weights and parameters (initialized empty)
-        # Packed weights (int8, shape: out_features x in_features/2) - Stores bundled 4-bit codes
-        self.register_buffer('packed_weights', torch.empty((out_features, in_features // 2), dtype=torch.int8))
-        # Bias (float32, shape: out_features)
-        self.register_buffer('bias', torch.empty(out_features, dtype=torch.float32))
-        # Quantization parameters (scalar)
-        self.register_buffer('min_exp', torch.tensor(0, dtype=torch.int32)) # Still needed for unmapping
-        # Activation quantization scale (calibrated)
-        self.register_buffer('activation_scale', torch.tensor(1.0, dtype=torch.float32))
-
-    def configure_quantization(
-        self,
-        linear_layer: nn.Linear,
-        quantizer: LogQuantizer,
-        activation_scale: torch.Tensor
-    ):
-        """Quantizes weights from linear_layer, packs them, stores activation scale."""
-        if linear_layer.in_features != self.in_features or linear_layer.out_features != self.out_features:
-            raise ValueError("Layer dimensions mismatch")
-
-        weight = linear_layer.weight.data # Assume already on correct device
-        bias_data = linear_layer.bias.data if linear_layer.bias is not None else torch.zeros(self.out_features, device=weight.device)
-
-        # Ensure quantizer is ready (find_params should ideally be called once globally or per layer type)
-        quantizer.find_params(weight, weight=True)
-        if not quantizer.ready():
-             raise RuntimeError("Quantizer failed to find parameters.")
-
-        # Quantize to get 4-bit nibbles (bundled codes)
-        packed_nibbles = quantizer.quantize(weight)
-
-        # Pack nibbles into bytes
-        packed_bytes = quantizer.pack(packed_nibbles)
-
-        # Store packed data and parameters
-        self.packed_weights.copy_(packed_bytes) # Store packed 4-bit codes
-        self.bias.copy_(bias_data)
-        self.min_exp.copy_(torch.tensor(int(quantizer.min_exp.item()), dtype=torch.int32))
-        self.activation_scale.copy_(activation_scale.clamp(min=1e-9)) # Store calibrated scale
-
-        # print(f"  Layer {self.out_features}x{self.in_features} configured.") # Optional print
-
-
-    def forward(self, x):
-        # x shape: (batch_size, sequence_length, in_features) or (..., in_features)
-        original_shape = x.shape
-        # Reshape input to (batch*seq, in_features) if needed
-        if x.ndim > 2:
-            x = x.reshape(-1, x.shape[-1])
-
-        # --- Activation Quantization (Calibrated) ---
-        q_max_act = 2**(self.ACT_BITS - 1) - 1
-        q_min_act = -2**(self.ACT_BITS - 1)
-        # Use the pre-calculated scale stored in the buffer
-        # Need to handle potential shape mismatch if scale is per-token/channel (not implemented here)
-        delta_lsb = self.activation_scale
-        # Quantize and clamp activations
-        a_quant = torch.round(x / delta_lsb).clamp(q_min_act, q_max_act).to(torch.int32)
-        # --- End Activation Quantization ---
-
-        # Prepare output tensor - Match the expected model dtype (likely half)
-        output_shape = (*x.shape[:-1], self.out_features)
-        # Determine dtype from input or a layer parameter if possible, default to half
-        output_dtype = x.dtype # Assume output should match input dtype
-        output = torch.empty(output_shape, dtype=output_dtype, device=x.device)
-
-        # Kernel outputs float32, so we need a temporary float32 buffer
-        output_float32 = torch.empty(output_shape, dtype=torch.float32, device=x.device)
-
-        # Iterate over batch dimension (kernel expects 1D activation vector)
-        # TODO: Optimize this loop - ideally use a batch-aware kernel
-        for i in range(x.shape[0]):
-            a_quant_single = a_quant[i].contiguous()
-            # Use the single scalar scale for the whole layer
-            delta_lsb_single = delta_lsb.item()
-            # Write kernel output to the temporary float32 buffer slice
-            output_single_float32 = output_float32[i]
-
-            # Explicitly set device context before kernel launch
-            with torch.cuda.device(self.packed_weights.device): # Use packed_weights device
-                logmatvec_cuda.forward_packed4bit( # Call updated kernel signature
-                    a_quant_single,
-                    self.packed_weights, # Pass packed 4-bit codes
-                    output_single_float32, # Write to float32 buffer slice
-                    delta_lsb_single,
-                    self.min_exp.item()
-                )
-
-        # Add bias (ensure bias is correct dtype before adding)
-        # Cast kernel output back to target dtype before adding bias
-        output = output_float32.to(output_dtype)
-        output += self.bias.to(output_dtype) # Ensure bias matches output dtype
-
-        # Reshape output to original shape (if needed)
-        if len(original_shape) > 2:
-            output = output.reshape(*original_shape[:-1], self.out_features)
-
-        return output
-
-# --- End Custom Layer Definition ---
+from quant import get_quantizer
 
 
 def get_opt(model):
@@ -139,10 +20,9 @@ def get_opt(model):
     model.seqlen = model.config.max_position_embeddings
     return model
 
-# --- Original GPTQ Sequential Logic (Renamed) ---
 @torch.no_grad()
-def opt_sequential_gptq(model, dataloader, quantizer_name, dev, args): # Added args parameter
-    print('Starting GPTQ quantization...') # Updated print statement for clarity
+def opt_sequential(model, dataloader, quantizer_name, dev):
+    print('Starting ...')
 
     use_cache = model.config.use_cache
     model.config.use_cache = False
@@ -226,11 +106,7 @@ def opt_sequential_gptq(model, dataloader, quantizer_name, dev, args): # Added a
             print(i, name)
             print('Quantizing ...')
             gptq[name].fasterquant(
-                percdamp=args.percdamp, 
-                groupsize=args.groupsize, 
-                actorder=args.act_order, 
-                static_groups=args.static_groups,
-                log_error_scale_power=args.log_error_scale_power # Pass the new arg
+                percdamp=args.percdamp, groupsize=args.groupsize, actorder=args.act_order, static_groups=args.static_groups
             )
             quantizers['model.decoder.layers.%d.%s' % (i, name)] = gptq[name].quantizer
             gptq[name].free()
@@ -246,330 +122,21 @@ def opt_sequential_gptq(model, dataloader, quantizer_name, dev, args): # Added a
 
     model.config.use_cache = use_cache
     
-    # Ensure the original GPTQ function returns the quantizers dictionary
     return quantizers
-# --- End Original GPTQ Sequential Logic ---
 
-
-# --- LogPack4bit Sequential Logic (Replaces original opt_sequential) ---
 @torch.no_grad()
-def opt_sequential(model, dataloader, quantizer_name, dev): # quantizer_name is less relevant here, but kept for signature
-    print('Starting LogPack4bit quantization...')
-
-    # Ensure global args is accessible or pass it in if needed
-    # Assuming args is accessible globally as defined in if __name__ == '__main__'
-    global args
-
-    use_cache = model.config.use_cache
-    model.config.use_cache = False
-    layers = model.model.decoder.layers # Get layers
-
-    # --- Activation Calibration Setup ---
-    print("Collecting activation statistics...")
-    act_scales = {}
-    act_dict = {} # To store intermediate activations
-
-    def stat_input_hook(m, x, y, name):
-        # Find layer name corresponding to module m
-        if isinstance(x, tuple):
-            x = x[0]
-        if name not in act_dict:
-             act_dict[name] = []
-        # Store activations on CPU to save GPU memory during calibration
-        act_dict[name].append(x.detach().cpu())
-
-    hooks = []
-    hooked_layer_names = set()
-    for name, m in model.named_modules():
-        if isinstance(m, nn.Linear):
-             if m.in_features % 2 == 0:
-                  if name not in hooked_layer_names:
-                      hooks.append(
-                           m.register_forward_hook(
-                                lambda mod, inp, outp, n=name: stat_input_hook(mod, inp, outp, n)
-                           )
-                      )
-                      hooked_layer_names.add(name)
-
-    print(f"  Running {args.nsamples} calibration samples...")
-    model.to(dev) # Move model to GPU for calibration run
-    # Ensure embeddings are on the correct device
-    model.model.decoder.embed_tokens = model.model.decoder.embed_tokens.to(dev)
-    model.model.decoder.embed_positions = model.model.decoder.embed_positions.to(dev)
-    if hasattr(model.model.decoder, 'project_in') and model.model.decoder.project_in:
-        model.model.decoder.project_in = model.model.decoder.project_in.to(dev)
-
-    # Run calibration samples
-    for i in range(args.nsamples):
-         # Assuming dataloader is a list of batches
-         batch = dataloader[i][0].to(dev)
-         try:
-              _ = model(batch)
-         except Exception as e:
-              print(f"Warning: Error during calibration forward pass on sample {i}: {e}")
-              pass # Continue for now
-    for h in hooks:
-         h.remove()
-
-    model.cpu() # Move model back to CPU after calibration
-    torch.cuda.empty_cache()
-
-    # Calculate activation scales
-    q_max_act = 2**(LogMatVecPackedLinear.ACT_BITS - 1) - 1
-    print("  Calculating activation scales...")
-    for name, activations in act_dict.items():
-         if not activations:
-              print(f"  Warning: No activations collected for {name}. Skipping scale calculation.")
-              continue
-         try:
-            act_tensor = torch.cat(activations, dim=0).float()
-         except RuntimeError as e:
-            print(f"  Warning: Could not concatenate activations for {name}. Error: {e}. Skipping.")
-            continue
-         if act_tensor.ndim < 2:
-             print(f"  Warning: Activation tensor for {name} has unexpected shape {act_tensor.shape}. Skipping.")
-             continue
-         act_max_abs = torch.max(torch.abs(act_tensor.view(-1, act_tensor.shape[-1])), dim=0)[0]
-         layer_max_abs = torch.max(act_max_abs)
-         act_scales[name] = (layer_max_abs / q_max_act).clamp(min=1e-9) # Store scale on CPU
-
-    del act_dict
-    print("Activation statistics collected.")
-    # --- End Activation Calibration ---
-
-
-    # --- Log Quantization and Layer Replacement ---
-    print("\nApplying Logarithmic Quantization and Packing...")
-    if quantizer_name != 'logarithm' or args.wbits != 4:
-         print("Warning: LogPack4bit flow selected but quantizer/wbits mismatch. Ensure --quantizer logarithm --wbits 4")
-
-    log_quantizer = LogQuantizer()
-    log_quantizer.configure(bits=args.wbits)
-
-    layers_replaced_count = 0
-    # Iterate through layers again for replacement (ensure layers is correct reference)
-    layers = model.model.decoder.layers
-    for i in range(len(layers)):
-        print(f"Processing layer {i}...")
-        layer = layers[i] # Keep on CPU
-        layer_modules = find_layers(layer)
-
-        for name, lin_layer in layer_modules.items():
-            if not isinstance(lin_layer, nn.Linear): continue
-            if lin_layer.in_features % 2 != 0:
-                print(f"  Skipping {name}: Odd in_features ({lin_layer.in_features}).")
-                continue
-
-            full_name_found = None
-            for model_name, mod in model.named_modules():
-                 if mod is lin_layer:
-                      full_name_found = model_name
-                      break
-
-            if full_name_found is None or full_name_found not in act_scales:
-                 print(f"  Warning: Activation scale not found for {name} (lookup name: {full_name_found}). Skipping.")
-                 continue
-
-            print(f"  Replacing {name} with LogMatVecPackedLinear...")
-            lin_layer.to(dev) # Move original to GPU for quantization
-            custom_layer = LogMatVecPackedLinear(lin_layer.in_features, lin_layer.out_features).to(dev)
-            custom_layer.configure_quantization(
-                lin_layer,
-                log_quantizer,
-                act_scales[full_name_found].to(dev) # Pass scale to GPU
-            )
-            lin_layer.cpu() # Move original back
-            custom_layer.cpu() # Move custom layer to CPU
-
-            parent_name = name.rsplit('.', 1)[0] if '.' in name else ''
-            sub_layer_name = name.rsplit('.', 1)[-1]
-            if parent_name:
-                 parent_module = layer.get_submodule(parent_name)
-            else:
-                 parent_module = layer
-            setattr(parent_module, sub_layer_name, custom_layer)
-            layers_replaced_count += 1
-
-        if i % 5 == 0: torch.cuda.empty_cache()
-
-    print(f"Logarithmic quantization finished. Replaced {layers_replaced_count} layers.")
-    model.config.use_cache = use_cache
-    return {} # Return empty dict as quantizers aren't generated here
-# --- End LogPack4bit Sequential Logic ---
-
-
-# --- Loading Function for Saved LogPack4bit Models ---
-def load_logpack4bit(model_name, checkpoint_path):
-    """
-    Loads a LogPack4bit quantized model.
-
-    This involves:
-    1. Getting the base model structure.
-    2. Replacing nn.Linear layers (that would have been quantized)
-       with LogMatVecPackedLinear layer stubs.
-    3. Loading the saved state_dict containing the packed weights and parameters.
-    """
-    print(f"Loading LogPack4bit model structure for {model_name}...")
-    # Get the base model structure (usually FP16)
-    model = get_opt(model_name)
-    model.eval() # Set to evaluation mode
-
-    # --- Replace Linear layers with LogMatVecPackedLinear ---
-    # This needs to mirror the replacement logic used during quantization
-    # to ensure the state_dict keys match the model structure.
-    print("Replacing eligible Linear layers with LogMatVecPackedLinear stubs...")
-    layers_replaced_count = 0
-    # Ensure we are iterating through the correct layers attribute
-    if hasattr(model, 'model') and hasattr(model.model, 'decoder') and hasattr(model.model.decoder, 'layers'):
-        layers = model.model.decoder.layers
-        for i in range(len(layers)):
-            layer = layers[i]
-            # Use find_layers to find nn.Linear modules within each decoder layer
-            layer_modules = find_layers(layer, [nn.Linear])
-
-            for name, lin_layer in layer_modules.items():
-                # Check if the layer is eligible for replacement (must have even in_features)
-                if isinstance(lin_layer, nn.Linear) and lin_layer.in_features % 2 == 0:
-                    # Create the custom layer stub. Its parameters (packed_weights, bias, etc.)
-                    # will be populated by load_state_dict.
-                    custom_layer = LogMatVecPackedLinear(lin_layer.in_features, lin_layer.out_features)
-
-                    # Replace the original layer with the custom one in the model structure
-                    parent_name = name.rsplit('.', 1)[0] if '.' in name else ''
-                    sub_layer_name = name.rsplit('.', 1)[-1]
-                    try:
-                        if parent_name:
-                            parent_module = layer.get_submodule(parent_name)
-                        else:
-                            parent_module = layer # Direct attribute of the layer
-                        setattr(parent_module, sub_layer_name, custom_layer)
-                        layers_replaced_count += 1
-                    except AttributeError:
-                         print(f"  Warning: Could not find parent module {parent_name} for {name} in layer {i}. Skipping replacement.")
-
-        print(f"Replaced {layers_replaced_count} layers with LogMatVecPackedLinear stubs.")
-    else:
-        print("Warning: Could not find model.model.decoder.layers. Skipping layer replacement for loading.")
-    # --- End Replacement ---
-
-    print(f"Loading state dict from {checkpoint_path}...")
-    # Load state dict onto CPU first to avoid GPU memory issues if the model is large
-    state_dict = torch.load(checkpoint_path, map_location='cpu')
-
-    # Handle potential prefixes if the model was saved using DataParallel or DDP
-    # state_dict = {k.replace('module.', ''): v for k, v in state_dict.items()}
-
-    # Load the state dictionary into the modified model structure
-    try:
-        model.load_state_dict(state_dict, strict=True) # Use strict=True to catch mismatches
-        print("LogPack4bit model state_dict loaded successfully.")
-    except RuntimeError as e:
-        print(f"Error loading state_dict: {e}")
-        print("This might indicate a mismatch between the saved checkpoint and the expected model structure.")
-        # Optionally, you could try strict=False, but it might hide issues:
-        # model.load_state_dict(state_dict, strict=False)
-        # print("Loaded state_dict with strict=False. Some weights might be missing or unexpected.")
-        raise e # Re-raise the error to halt execution
-
-    model.eval() # Ensure model is in eval mode after loading
-    return model
-# --- End Loading Function ---
-
-
-# --- Evaluation Function ---
-@torch.no_grad()
-def opt_eval(model, testenc, dev): # Use the single 'dev' parameter now
+def opt_eval(model, testenc, dev):
     print('Evaluating ...')
 
-    # Force model to the designated evaluation device, overriding any multi-GPU setup
-    print(f"  Moving model to evaluation device: {dev}")
-    model.to(dev)
-    # Remove the gpus attribute if it exists from benchmarking to prevent confusion
-    if hasattr(model, 'gpus'):
-        delattr(model, 'gpus')
-        # Unwrap layers from MoveModule if necessary (model.to(dev) might handle this, but explicit is safer)
-        # Use try-except as MoveModule might not be defined if benchmark wasn't run multi-gpu
-        try:
-            from gptq import MoveModule # Import locally for isinstance check
-            layers = model.model.decoder.layers
-            for i in range(len(layers)):
-                if isinstance(layers[i], MoveModule):
-                     layers[i] = layers[i].module
-        except (NameError, ImportError): # Handle if MoveModule isn't defined/imported
-            pass
-        except AttributeError: # Handle cases where model structure might differ
-             print("  Warning: Could not access layers to unwrap MoveModule.")
-             pass
-
-
-    testenc = testenc.input_ids # Assuming testloader passed is actually testenc from get_loaders
+    testenc = testenc.input_ids
     nsamples = testenc.numel() // model.seqlen
 
     use_cache = model.config.use_cache
     model.config.use_cache = False
     layers = model.model.decoder.layers
 
-    # If evaluating on multi-GPU, the devices are set by opt_multigpu.
-    # If evaluating on single GPU, model.to(input_device) handles placement.
-    # The explicit moves below are only needed if NOT using model.to(dev) in the single-GPU case,
-    # but they conflict with the multi-GPU case.
-    # Let's remove them as they are either redundant or incorrect for multi-GPU.
-
-    # model.model.decoder.embed_tokens = model.model.decoder.embed_tokens.to(input_device) # Handled by model.to or opt_multigpu
-    # model.model.decoder.embed_positions = model.model.decoder.embed_positions.to(input_device) # Handled by model.to or opt_multigpu
-    # if hasattr(model.model.decoder, 'project_in') and model.model.decoder.project_in:
-    #     model.model.decoder.project_in = model.model.decoder.project_in.to(input_device) # Handled by model.to or opt_multigpu
-    # if hasattr(model.model.decoder, 'project_out') and model.model.decoder.project_out:
-    #     model.model.decoder.project_out = model.model.decoder.project_out.to(output_device) # Handled by opt_multigpu
-    # if model.model.decoder.final_layer_norm is not None:
-    #     model.model.decoder.final_layer_norm = model.model.decoder.final_layer_norm.to(output_device) # Handled by opt_multigpu
-    # model.lm_head = model.lm_head.to(output_device) # Handled by opt_multigpu
-
-    # Ensure necessary components are on the correct devices if multi-GPU (Handled by opt_multigpu)
-    # Embeddings should be on input_device, final_ln/lm_head on output_device (Handled by opt_multigpu)
-    # This should already be handled by opt_multigpu if it was called.
-    # If evaluating a model *not* processed by opt_multigpu, model.to(dev) handles it.
-
-    # No need to prepare the large 'inps' buffer for evaluation
-
-    nlls = []
-    loss_fct = nn.CrossEntropyLoss()
-    for i in range(nsamples):
-        # Move batch to the single evaluation device
-        batch = testenc[:, (i * model.seqlen):((i + 1) * model.seqlen)].to(dev)
-        # Standard forward pass for evaluation (model is now entirely on 'dev')
-        outputs = model(batch)
-        lm_logits = outputs.logits # Logits will be on 'dev'
-
-        # Shift logits and labels for next token prediction loss
-        shift_logits = lm_logits[:, :-1, :].contiguous()
-        # Labels are already on 'dev' from batch assignment
-        shift_labels = batch[:, 1:]
-
-        # Calculate loss on 'dev'
-        loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
-        neg_log_likelihood = loss.float() * model.seqlen # Use actual sequence length if different
-        nlls.append(neg_log_likelihood)
-        # Optional: Clear cache between samples if memory is very tight
-        # torch.cuda.empty_cache()
-
-    # Stack NLLs (on 'dev') and calculate PPL
-    ppl = torch.exp(torch.stack(nlls).sum() / (nsamples * model.seqlen))
-    print(f"Perplexity: {ppl.item():.4f}")
-
-    model.config.use_cache = use_cache # Restore use_cache setting
-
-    # Move model back to CPU
-    model.cpu()
-    # Explicitly clear GPU memory after moving model to CPU
-    torch.cuda.empty_cache()
-
-    return ppl.item()
-# --- End Evaluation Function ---
-
-
-# TODO: perform packing on GPU
-def opt_pack3(model, quantizers):
+    model.model.decoder.embed_tokens = model.model.decoder.embed_tokens.to(dev)
+    model.model.decoder.embed_positions = model.model.decoder.embed_positions.to(dev)
     if hasattr(model.model.decoder, 'project_out') and model.model.decoder.project_out:
         model.model.decoder.project_out = model.model.decoder.project_out.to(dev) 
     if hasattr(model.model.decoder, 'project_in') and model.model.decoder.project_in:
@@ -786,12 +353,9 @@ def benchmark(model, input_ids, check=False):
             del out
         sync()
         import numpy as np
-        median_time = np.median(times)
-        print(f'Median latency: {median_time:.6f} s')
+        print('Median:', np.median(times))
         if check:
             print('PPL:', torch.exp(tot / (input_ids.numel() - 1)).item())
-        # Return the median time for comparison
-        return median_time
 
 
 if __name__ == '__main__':
@@ -826,21 +390,19 @@ if __name__ == '__main__':
     ) 
     parser.add_argument(
         '--wbits', type=int, default=16, choices=[2, 3, 4, 16],
-        help='#bits to use for quantization; use 16 for evaluating base model. Use 4 for logpack.'
+        help='#bits to use for quantization; use 16 for evaluating base model.'
     )
-    # Commenting out GPTQ specific args - enable if needed for GPTQ mode
-    # parser.add_argument(
-    #     '--trits', action='store_true',
-    #     help='Whether to use trits for quantization.'
-    # )
-    # parser.add_argument(
-    #     '--groupsize', type=int, default=-1,
-    # #     '--groupsize', type=int, default=-1, # This line seems duplicated, commenting out both
-    #     help='Groupsize to use for quantization; default uses full row.'
-    # )
+    parser.add_argument(
+        '--trits', action='store_true',
+        help='Whether to use trits for quantization.'
+    )
+    parser.add_argument(
+        '--groupsize', type=int, default=-1,
+        help='Groupsize to use for quantization; default uses full row.'
+    )
     parser.add_argument(
         '--sym', action='store_true',
-        help='Whether to perform symmetric quantization (Currently affects GPTQ/RTN, not LogPack activation quant).'
+        help='Whether to perform symmetric quantization.'
     )
     parser.add_argument(
         '--save', type=str, default='',
@@ -875,194 +437,42 @@ if __name__ == '__main__':
         help='Whether to use static groups; recommended when using `--actorder` for more efficient inference.'
     )
     parser.add_argument(
-        '--quantizer', type=str, choices=['uniform_minmax', 'logarithm', 'quantile'],default='uniform_minmax',
-        help="Which parameter quantizer to use. 'logarithm' triggers LogPack4bit flow if wbits=4.",
-    )
-    # Commenting out GPTQ specific args
-    # parser.add_argument(
-    #     '--log-error-scale-power', type=float, default=0.0,
-    #     help='Power p for scaling log quant error: err_scaled = err * (|q|+eps)^(-p). Default 0.0 (no scaling).'
-    # )
-    # parser.add_argument(
-    #     '--act-order', action='store_true',
-    #     help='Whether to apply the activation order GPTQ heuristic'
-    # )
-    # parser.add_argument(
-    #     '--static-groups', action='store_true',
-    #     help='Whether to use static groups; recommended when using `--actorder` for more efficient inference.'
-    # )
-    parser.add_argument(
-        '--quant_mode', type=str, default='gptq', choices=['gptq', 'rtn', 'logpack4bit'],
-        help="Select quantization mode: gptq, rtn (nearest), or logpack4bit"
+        '--quantizer', type=str, choices=['uniform_minmax', 'logarithm', 'quantile', 'kmeans', 'apot', 'lloydmax'], default='uniform_minmax',
+        help="Which parameter quantizer to use.",
     )
 
+    # NOTE: add the quantizer here.
 
     args = parser.parse_args()
 
-    # --- Select Quantization Mode ---
-    is_logpack_mode = (args.quant_mode == 'logpack4bit')
-    is_rtn_mode = (args.quant_mode == 'rtn' or args.nearest) # Allow --nearest for backward compat
-    is_gptq_mode = (args.quant_mode == 'gptq' and not is_rtn_mode and not is_logpack_mode)
-
-    if is_logpack_mode and args.wbits != 4:
-         print("Warning: --quant_mode logpack4bit requires --wbits 4. Setting wbits=4.")
-         args.wbits = 4
-    if is_logpack_mode:
-         args.quantizer = 'logarithm' # Ensure correct quantizer name for logpack mode
-
-    # --- Load Model ---
     if args.load:
-        print(f"Loading model from: {args.load}")
-        if is_logpack_mode:
-             # Use the new loading function for LogPack4bit
-             model = load_logpack4bit(args.model, args.load)
-        elif is_gptq_mode:
-             # Assuming load_quant3 is appropriate for GPTQ models saved previously
-             # Might need adjustments if saving format for GPTQ changed
-             print("Loading GPTQ quantized model...")
-             # Ensure load_quant3 exists and is compatible
-             try:
-                 model = load_quant3(args.model, args.load)
-             except NameError:
-                 print("Error: load_quant3 function not found or defined.")
-                 print("Cannot load GPTQ model. Ensure relevant functions are available.")
-                 exit(1)
-             except Exception as e:
-                 print(f"Error loading GPTQ model using load_quant3: {e}")
-                 exit(1)
-        else: # Includes RTN mode - loading isn't typically done/needed for RTN
-             print(f"Warning: Loading not specifically implemented or typically used for quant_mode={args.quant_mode}.")
-             print("Attempting generic model loading (may fail if quantization needed)...")
-             # Fallback to base model loading - this likely won't load a quantized state correctly
-             model = get_opt(args.model)
-             try:
-                 # Try loading state dict directly - might work for FP16 saves, unlikely for quantized
-                 state_dict = torch.load(args.load, map_location='cpu')
-                 model.load_state_dict(state_dict)
-                 print("Loaded state dict directly into base model.")
-             except Exception as e:
-                 print(f"Could not load state dict directly: {e}")
-                 print("Proceeding with base FP16 model structure.")
-             model.eval()
+        model = load_quant3(args.model, args.load)
     else:
         model = get_opt(args.model)
         model.eval()
 
-    # --- Get Data ---
-    # Ensure dataloader returns indexable data for calibration
     dataloader, testloader = get_loaders(
         args.dataset, nsamples=args.nsamples, seed=args.seed, model=args.model, seqlen=model.seqlen
     )
-    # Convert dataloader to a list for easier indexing during calibration
-    # This loads all calibration data into memory - adjust if nsamples is very large
-    print("Loading calibration data into memory...")
-    dataloader = [batch for batch in dataloader]
-    print("Calibration data loaded.")
 
-
-    # --- Apply Quantization ---
-    # Apply GPTQ or LogPack ONLY if wbits < 16, not RTN mode, AND not loading a checkpoint
-    if args.wbits < 16 and not is_rtn_mode and not args.load:
+    if args.wbits < 16 and not args.nearest:
         tick = time.time()
-        if is_gptq_mode:
-             print("Applying GPTQ quantization...")
-             # Pass necessary GPTQ args here
-             # Ensure opt_sequential_gptq exists and accepts args
-             quantizers = opt_sequential_gptq(model, dataloader, args.quantizer, DEV, args)
-        elif is_logpack_mode:
-             print("Applying LogPack4bit quantization...")
-             # opt_sequential is now the LogPack function
-             quantizers = opt_sequential(model, dataloader, args.quantizer, DEV)
-        else:
-             # This case should not be reached due to arg choices, but included for safety
-             print("Error: Invalid quantization mode selected for wbits < 16.")
-             exit(1)
-        print(f"Quantization time: {time.time() - tick:.2f}s")
-    elif is_rtn_mode:
-         print("Applying RTN (nearest neighbor) quantization...")
-         # RTN logic is typically applied during evaluation in the original script
-         pass # No separate quantization step needed before eval/benchmark for RTN
-    else:
-        print("Running FP16 model (wbits=16).")
+        quantizers = opt_sequential(model, dataloader, args.quantizer, DEV)
+        print(time.time() - tick)
 
-
-    # --- Benchmarking (Comparison) ---
-    median_fp16_time = None
-    median_quant_time = None
-    if args.benchmark > 0:
-        print("\n--- Benchmarking FP16 Model ---")
-        # Load a fresh FP16 model instance for benchmarking
-        fp16_model = get_opt(args.model)
-        fp16_model.eval()
-
+    if args.benchmark:
         gpus = [torch.device('cuda:%d' % i) for i in range(torch.cuda.device_count())]
         if len(gpus) > 1:
-            print(f"Using {len(gpus)} GPUs for FP16 benchmark.")
-            opt_multigpu(fp16_model, gpus)
+            opt_multigpu(model, gpus)
         else:
-            print(f"Using single GPU {DEV} for FP16 benchmark.")
-            fp16_model = fp16_model.to(DEV)
+            model = model.to(DEV)
+        if args.benchmark:
+            input_ids = next(iter(dataloader))[0][:, :args.benchmark]
+            benchmark(model, input_ids, check=args.check)
+    if args.load:
+        exit()
 
-        # Get benchmark data (use the first batch from the dataloader)
-        # Ensure dataloader is still available or reload if necessary
-        # Assuming dataloader is the list created earlier
-        if not dataloader:
-             print("Error: Dataloader is empty, cannot get benchmark data.")
-             exit(1)
-        # Use next(iter()) to get the first batch, matching the original code
-        input_ids = next(iter(dataloader))[0][:, :args.benchmark]
-
-        median_fp16_time = benchmark(fp16_model, input_ids, check=args.check)
-        print(f"FP16 Median Time: {median_fp16_time:.6f} s")
-
-        # Clean up FP16 model from GPU memory
-        del fp16_model
-        torch.cuda.empty_cache()
-        print("--- End FP16 Benchmark ---")
-
-    # Now, benchmark the quantized/loaded model (using the 'model' variable from earlier)
-    if args.benchmark > 0 and (args.wbits < 16 or args.load):
-        print("\n--- Benchmarking Quantized/Loaded Model ---")
-        gpus = [torch.device('cuda:%d' % i) for i in range(torch.cuda.device_count())]
-        if len(gpus) > 1:
-            print(f"Using {len(gpus)} GPUs for quantized benchmark.")
-            # opt_multigpu should ideally be called *after* quantization/loading
-            # if the model isn't already configured for multi-GPU by the loading/quant process.
-            # Let's assume 'model' needs multi-gpu setup here if applicable.
-            # Check if model already has gpus attribute from loading potentially
-            if not hasattr(model, 'gpus'):
-                 opt_multigpu(model, gpus)
-        else:
-            print(f"Using single GPU {DEV} for quantized benchmark.")
-            model = model.to(DEV) # Ensure model is on the correct device
-
-        # Reuse input_ids from FP16 benchmark
-        if 'input_ids' not in locals() or input_ids is None:
-             print("Error: Benchmark input_ids not available.")
-             exit(1)
-
-        median_quant_time = benchmark(model, input_ids, check=args.check)
-        print(f"Quantized Model Median Time: {median_quant_time:.6f} s")
-
-        # Calculate and print speedup
-        if median_fp16_time and median_quant_time and median_quant_time > 0:
-            speedup = median_fp16_time / median_quant_time
-            print(f"\nSpeedup (FP16 / Quantized): {speedup:.2f}x")
-        else:
-            print("\nCould not calculate speedup (missing benchmark times).")
-        print("--- End Quantized Benchmark ---")
-
-    # --- Original Load Exit Logic ---
-    # If we loaded a model, we might just want to benchmark or evaluate, then exit.
-    # The evaluation loop below will run on the loaded/quantized model.
-    # If only benchmarking was desired, the user might expect an exit here.
-    # However, the current structure continues to evaluation, which is also reasonable.
-    # Let's keep the original exit logic placement after the eval loop.
-    # if args.load:
-    #     exit() # Moved lower
-
-    # --- Evaluation Loop ---
-    datasets = ['wikitext2', 'ptb', 'c4']
+    datasets = ['wikitext2', 'ptb', 'c4'] 
     if args.new_eval:
       datasets = ['wikitext2', 'ptb-new', 'c4-new']
     for dataset in datasets: 
@@ -1072,21 +482,6 @@ if __name__ == '__main__':
         print(dataset)
         opt_eval(model, testloader, DEV)
 
-    # --- Final Exit for --load ---
-    # If we loaded a model, evaluated it, maybe saved it, exit now.
-    if args.load:
-        print("Exiting after processing loaded model.")
-        exit()
-
-    # --- Save Model State ---
-    # This saving logic now correctly applies to models that were either
-    # quantized in this run or loaded and then potentially evaluated/benchmarked.
     if args.save:
-        print(f"\nSaving quantized model state_dict to {args.save}...")
-        # Ensure the model is on the CPU before saving to avoid GPU memory in the file
-        # and potential issues if loading on a machine with different GPU setup.
-        model.cpu()
-        torch.save(model.state_dict(), args.save)
-        print("Model saved.")
-        # Note: If further operations requiring the model on GPU were planned here,
-        # it would need to be moved back, e.g., model.to(DEV)
+        opt_pack3(model, quantizers)
+        torch.save(model.state_dict(), args.save) 
