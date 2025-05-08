@@ -1,6 +1,0 @@
-{"model": "bigscience/bloom-3b", "quantizer": "lloydmax", "wbits": 4, "groupsize": 128, "sym": false, "percdamp": 0.01, "results": {"wikitext2": 13.686469078063965, "ptb": 23.756908416748047, "c4": 16.39508819580078}}
-{"model": "bigscience/bloom-3b", "quantizer": "uniform_minmax", "wbits": 4, "groupsize": 128, "sym": false, "percdamp": 0.01, "results": {"wikitext2": 13.6346435546875, "ptb": 23.674436569213867, "c4": 16.371253967285156}}
-{"model": "bigscience/bloom-3b", "quantizer": "apot", "wbits": 4, "groupsize": 128, "sym": false, "percdamp": 0.01, "results": {"wikitext2": 17.08546257019043, "ptb": 30.65597915649414, "c4": 19.997844696044922}}
-{"model": "bigscience/bloom-3b", "quantizer": "logarithm", "wbits": 4, "groupsize": 128, "sym": false, "percdamp": 0.01, "results": {"wikitext2": 14.442291259765625, "ptb": 26.32407569885254, "c4": 17.672727584838867}}
-{"model": "bigscience/bloom-3b", "quantizer": "quantile", "wbits": 4, "groupsize": 128, "sym": false, "percdamp": 0.01, "results": {"wikitext2": 13.759645462036133, "ptb": 24.027786254882812, "c4": 16.501731872558594}}
-{"model": "bigscience/bloom-3b", "quantizer": "kmeans", "wbits": 4, "groupsize": 128, "sym": false, "percdamp": 0.01, "results": {"wikitext2": 14.646449089050293, "ptb": 26.71061134338379, "c4": 17.827394485473633}}
