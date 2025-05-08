@@ -158,11 +158,15 @@ class Quantizer(nn.Module):
 
 try:
     import quant_cuda
-except:
-    print('CUDA extension not installed.')
+    print("CUDA 3-bit kernel found.")
+    _quant_cuda_3bit_available = True
+except ImportError:
+    print('CUDA 3-bit kernel not found.')
+    _quant_cuda_3bit_available = False
+
 
 # Assumes layer is perfectly divisible into 1024 * 1024 blocks
-class Quant3Linear(nn.Module): 
+class Quant3Linear(nn.Module):
 
     def __init__(self, infeatures, outfeatures, faster=False):
         super().__init__()

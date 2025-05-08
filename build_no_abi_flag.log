@@ -1,0 +1,119 @@
+Using CUDA_HOME=/opt/cuda/cuda-11.7
+running install
+running bdist_egg
+running egg_info
+creating quant_cuda_4bit.egg-info
+writing quant_cuda_4bit.egg-info/PKG-INFO
+writing dependency_links to quant_cuda_4bit.egg-info/dependency_links.txt
+writing top-level names to quant_cuda_4bit.egg-info/top_level.txt
+writing manifest file 'quant_cuda_4bit.egg-info/SOURCES.txt'
+/cs/student/projects1/2021/cbarber/gptq/.venv/lib64/python3.9/site-packages/torch/utils/cpp_extension.py:476: UserWarning: Attempted to use ninja as the BuildExtension backend but we could not find ninja.. Falling back to using the slow distutils backend.
+  warnings.warn(msg.format('we could not find ninja.'))
+reading manifest file 'quant_cuda_4bit.egg-info/SOURCES.txt'
+adding license file 'LICENSE'
+writing manifest file 'quant_cuda_4bit.egg-info/SOURCES.txt'
+installing library code to build/bdist.linux-x86_64/egg
+running install_lib
+running build_ext
+building 'quant_cuda_4bit' extension
+creating build
+creating build/temp.linux-x86_64-3.9
+gcc -Wno-unused-result -Wsign-compare -DDYNAMIC_ANNOTATIONS_ENABLED=1 -DNDEBUG -O2 -fexceptions -g -grecord-gcc-switches -pipe -Wall -Werror=format-security -Wp,-D_FORTIFY_SOURCE=2 -Wp,-D_GLIBCXX_ASSERTIONS -fstack-protector-strong -m64 -march=x86-64-v2 -mtune=generic -fasynchronous-unwind-tables -fstack-clash-protection -fcf-protection -D_GNU_SOURCE -fPIC -fwrapv -O2 -fexceptions -g -grecord-gcc-switches -pipe -Wall -Werror=format-security -Wp,-D_FORTIFY_SOURCE=2 -Wp,-D_GLIBCXX_ASSERTIONS -fstack-protector-strong -m64 -march=x86-64-v2 -mtune=generic -fasynchronous-unwind-tables -fstack-clash-protection -fcf-protection -D_GNU_SOURCE -fPIC -fwrapv -O2 -fexceptions -g -grecord-gcc-switches -pipe -Wall -Werror=format-security -Wp,-D_FORTIFY_SOURCE=2 -Wp,-D_GLIBCXX_ASSERTIONS -fstack-protector-strong -m64 -march=x86-64-v2 -mtune=generic -fasynchronous-unwind-tables -fstack-clash-protection -fcf-protection -D_GNU_SOURCE -fPIC -fwrapv -fPIC -I/cs/student/projects1/2021/cbarber/gptq/.venv/lib64/python3.9/site-packages/torch/include -I/cs/student/projects1/2021/cbarber/gptq/.venv/lib64/python3.9/site-packages/torch/include/torch/csrc/api/include -I/cs/student/projects1/2021/cbarber/gptq/.venv/lib64/python3.9/site-packages/torch/include/TH -I/cs/student/projects1/2021/cbarber/gptq/.venv/lib64/python3.9/site-packages/torch/include/THC -I/opt/cuda/cuda-11.7/include -I/cs/student/projects1/2021/cbarber/gptq/.venv/include -I/usr/include/python3.9 -c quant_cuda_4bit.cpp -o build/temp.linux-x86_64-3.9/quant_cuda_4bit.o -D_GLIBCXX_USE_CXX11_ABI=1 -v -DTORCH_API_INCLUDE_EXTENSION_H -DPYBIND11_COMPILER_TYPE="_gcc" -DPYBIND11_STDLIB="_libstdcpp" -DPYBIND11_BUILD_ABI="_cxxabi1011" -DTORCH_EXTENSION_NAME=quant_cuda_4bit -D_GLIBCXX_USE_CXX11_ABI=0 -std=c++14
+Using built-in specs.
+COLLECT_GCC=/usr/bin/gcc
+OFFLOAD_TARGET_NAMES=nvptx-none
+OFFLOAD_TARGET_DEFAULT=1
+Target: x86_64-redhat-linux
+Configured with: ../configure --enable-bootstrap --enable-host-pie --enable-host-bind-now --enable-languages=c,c++,fortran,lto --prefix=/usr --mandir=/usr/share/man --infodir=/usr/share/info --with-bugurl=https://bugs.rockylinux.org/ --enable-shared --enable-threads=posix --enable-checking=release --with-system-zlib --enable-__cxa_atexit --disable-libunwind-exceptions --enable-gnu-unique-object --enable-linker-build-id --with-gcc-major-version-only --enable-plugin --enable-initfini-array --without-isl --enable-multilib --with-linker-hash-style=gnu --enable-offload-targets=nvptx-none --without-cuda-driver --enable-gnu-indirect-function --enable-cet --with-tune=generic --with-arch_64=x86-64-v2 --with-arch_32=x86-64 --build=x86_64-redhat-linux --with-build-config=bootstrap-lto --enable-link-serialization=1
+Thread model: posix
+Supported LTO compression algorithms: zlib zstd
+gcc version 11.5.0 20240719 (Red Hat 11.5.0-5) (GCC) 
+COLLECT_GCC_OPTIONS='-Wno-unused-result' '-Wsign-compare' '-D' 'DYNAMIC_ANNOTATIONS_ENABLED=1' '-D' 'NDEBUG' '-O2' '-g' '-pipe' '-Werror=format-security' '-fstack-protector-strong' '-fcf-protection=full' '-D' '_GNU_SOURCE' '-O2' '-g' '-pipe' '-Werror=format-security' '-fstack-protector-strong' '-fcf-protection=full' '-D' '_GNU_SOURCE' '-O2' '-fexceptions' '-g' '-grecord-gcc-switches' '-pipe' '-Wall' '-Werror=format-security' '-fstack-protector-strong' '-m64' '-march=x86-64-v2' '-mtune=generic' '-fasynchronous-unwind-tables' '-fstack-clash-protection' '-fcf-protection=full' '-D' '_GNU_SOURCE' '-fwrapv' '-fPIC' '-I' '/cs/student/projects1/2021/cbarber/gptq/.venv/lib64/python3.9/site-packages/torch/include' '-I' '/cs/student/projects1/2021/cbarber/gptq/.venv/lib64/python3.9/site-packages/torch/include/torch/csrc/api/include' '-I' '/cs/student/projects1/2021/cbarber/gptq/.venv/lib64/python3.9/site-packages/torch/include/TH' '-I' '/cs/student/projects1/2021/cbarber/gptq/.venv/lib64/python3.9/site-packages/torch/include/THC' '-I' '/opt/cuda/cuda-11.7/include' '-I' '/cs/student/projects1/2021/cbarber/gptq/.venv/include' '-I' '/usr/include/python3.9' '-c' '-o' 'build/temp.linux-x86_64-3.9/quant_cuda_4bit.o' '-D' '_GLIBCXX_USE_CXX11_ABI=1' '-v' '-D' 'TORCH_API_INCLUDE_EXTENSION_H' '-D' 'PYBIND11_COMPILER_TYPE="_gcc"' '-D' 'PYBIND11_STDLIB="_libstdcpp"' '-D' 'PYBIND11_BUILD_ABI="_cxxabi1011"' '-D' 'TORCH_EXTENSION_NAME=quant_cuda_4bit' '-D' '_GLIBCXX_USE_CXX11_ABI=0' '-std=c++14' '-dumpdir' 'build/temp.linux-x86_64-3.9/'
+ /usr/libexec/gcc/x86_64-redhat-linux/11/cc1plus -quiet -v -I /cs/student/projects1/2021/cbarber/gptq/.venv/lib64/python3.9/site-packages/torch/include -I /cs/student/projects1/2021/cbarber/gptq/.venv/lib64/python3.9/site-packages/torch/include/torch/csrc/api/include -I /cs/student/projects1/2021/cbarber/gptq/.venv/lib64/python3.9/site-packages/torch/include/TH -I /cs/student/projects1/2021/cbarber/gptq/.venv/lib64/python3.9/site-packages/torch/include/THC -I /opt/cuda/cuda-11.7/include -I /cs/student/projects1/2021/cbarber/gptq/.venv/include -I /usr/include/python3.9 -D_GNU_SOURCE -D DYNAMIC_ANNOTATIONS_ENABLED=1 -D NDEBUG -D _GNU_SOURCE -D _GNU_SOURCE -D _GNU_SOURCE -D _GLIBCXX_USE_CXX11_ABI=1 -D TORCH_API_INCLUDE_EXTENSION_H -D PYBIND11_COMPILER_TYPE="_gcc" -D PYBIND11_STDLIB="_libstdcpp" -D PYBIND11_BUILD_ABI="_cxxabi1011" -D TORCH_EXTENSION_NAME=quant_cuda_4bit -D _GLIBCXX_USE_CXX11_ABI=0 -D_FORTIFY_SOURCE=2 -D_GLIBCXX_ASSERTIONS -D_FORTIFY_SOURCE=2 -D_GLIBCXX_ASSERTIONS -D_FORTIFY_SOURCE=2 -D_GLIBCXX_ASSERTIONS quant_cuda_4bit.cpp -quiet -dumpdir build/temp.linux-x86_64-3.9/ -dumpbase quant_cuda_4bit.cpp -dumpbase-ext .cpp -m64 -march=x86-64-v2 -mtune=generic -g -g -g -grecord-gcc-switches -O2 -O2 -O2 -Wno-unused-result -Wsign-compare -Werror=format-security -Werror=format-security -Wall -Werror=format-security -std=c++14 -version -fstack-protector-strong -fcf-protection=full -fstack-protector-strong -fcf-protection=full -fexceptions -fstack-protector-strong -fasynchronous-unwind-tables -fstack-clash-protection -fcf-protection=full -fwrapv -fPIC -o - |
+ as -v -I /cs/student/projects1/2021/cbarber/gptq/.venv/lib64/python3.9/site-packages/torch/include -I /cs/student/projects1/2021/cbarber/gptq/.venv/lib64/python3.9/site-packages/torch/include/torch/csrc/api/include -I /cs/student/projects1/2021/cbarber/gptq/.venv/lib64/python3.9/site-packages/torch/include/TH -I /cs/student/projects1/2021/cbarber/gptq/.venv/lib64/python3.9/site-packages/torch/include/THC -I /opt/cuda/cuda-11.7/include -I /cs/student/projects1/2021/cbarber/gptq/.venv/include -I /usr/include/python3.9 --gdwarf-5 --64 -o build/temp.linux-x86_64-3.9/quant_cuda_4bit.o
+GNU assembler version 2.35.2 (x86_64-redhat-linux) using BFD version version 2.35.2-54.el9
+GNU C++14 (GCC) version 11.5.0 20240719 (Red Hat 11.5.0-5) (x86_64-redhat-linux)
+	compiled by GNU C version 11.5.0 20240719 (Red Hat 11.5.0-5), GMP version 6.2.0, MPFR version 4.1.0-p9, MPC version 1.2.1, isl version none
+GGC heuristics: --param ggc-min-expand=100 --param ggc-min-heapsize=131072
+ignoring nonexistent directory "/usr/lib/gcc/x86_64-redhat-linux/11/include-fixed"
+ignoring nonexistent directory "/usr/lib/gcc/x86_64-redhat-linux/11/../../../../x86_64-redhat-linux/include"
+ignoring nonexistent directory "/cs/student/projects1/2021/cbarber/gptq/.venv/lib64/python3.9/site-packages/torch/include/TH"
+#include "..." search starts here:
+#include <...> search starts here:
+ /cs/student/projects1/2021/cbarber/gptq/.venv/lib64/python3.9/site-packages/torch/include
+ /cs/student/projects1/2021/cbarber/gptq/.venv/lib64/python3.9/site-packages/torch/include/torch/csrc/api/include
+ /cs/student/projects1/2021/cbarber/gptq/.venv/lib64/python3.9/site-packages/torch/include/THC
+ /opt/cuda/cuda-11.7/include
+ /cs/student/projects1/2021/cbarber/gptq/.venv/include
+ /usr/include/python3.9
+ /usr/lib/gcc/x86_64-redhat-linux/11/../../../../include/c++/11
+ /usr/lib/gcc/x86_64-redhat-linux/11/../../../../include/c++/11/x86_64-redhat-linux
+ /usr/lib/gcc/x86_64-redhat-linux/11/../../../../include/c++/11/backward
+ /usr/lib/gcc/x86_64-redhat-linux/11/include
+ /usr/local/include
+ /usr/include
+End of search list.
+GNU C++14 (GCC) version 11.5.0 20240719 (Red Hat 11.5.0-5) (x86_64-redhat-linux)
+	compiled by GNU C version 11.5.0 20240719 (Red Hat 11.5.0-5), GMP version 6.2.0, MPFR version 4.1.0-p9, MPC version 1.2.1, isl version none
+GGC heuristics: --param ggc-min-expand=100 --param ggc-min-heapsize=131072
+Compiler executable checksum: d4e669d05a484c57290a4fbf576937ee
+<command-line>: warning: "_GLIBCXX_USE_CXX11_ABI" redefined
+<command-line>: note: this is the location of the previous definition
+COMPILER_PATH=/usr/libexec/gcc/x86_64-redhat-linux/11/:/usr/libexec/gcc/x86_64-redhat-linux/11/:/usr/libexec/gcc/x86_64-redhat-linux/:/usr/lib/gcc/x86_64-redhat-linux/11/:/usr/lib/gcc/x86_64-redhat-linux/
+LIBRARY_PATH=/usr/lib/gcc/x86_64-redhat-linux/11/:/usr/lib/gcc/x86_64-redhat-linux/11/../../../../lib64/:/lib/../lib64/:/usr/lib/../lib64/:/usr/lib/gcc/x86_64-redhat-linux/11/../../../:/lib/:/usr/lib/
+COLLECT_GCC_OPTIONS='-Wno-unused-result' '-Wsign-compare' '-D' 'DYNAMIC_ANNOTATIONS_ENABLED=1' '-D' 'NDEBUG' '-O2' '-g' '-pipe' '-Werror=format-security' '-fstack-protector-strong' '-fcf-protection=full' '-D' '_GNU_SOURCE' '-O2' '-g' '-pipe' '-Werror=format-security' '-fstack-protector-strong' '-fcf-protection=full' '-D' '_GNU_SOURCE' '-O2' '-fexceptions' '-g' '-grecord-gcc-switches' '-pipe' '-Wall' '-Werror=format-security' '-fstack-protector-strong' '-m64' '-march=x86-64-v2' '-mtune=generic' '-fasynchronous-unwind-tables' '-fstack-clash-protection' '-fcf-protection=full' '-D' '_GNU_SOURCE' '-fwrapv' '-fPIC' '-I' '/cs/student/projects1/2021/cbarber/gptq/.venv/lib64/python3.9/site-packages/torch/include' '-I' '/cs/student/projects1/2021/cbarber/gptq/.venv/lib64/python3.9/site-packages/torch/include/torch/csrc/api/include' '-I' '/cs/student/projects1/2021/cbarber/gptq/.venv/lib64/python3.9/site-packages/torch/include/TH' '-I' '/cs/student/projects1/2021/cbarber/gptq/.venv/lib64/python3.9/site-packages/torch/include/THC' '-I' '/opt/cuda/cuda-11.7/include' '-I' '/cs/student/projects1/2021/cbarber/gptq/.venv/include' '-I' '/usr/include/python3.9' '-c' '-o' 'build/temp.linux-x86_64-3.9/quant_cuda_4bit.o' '-D' '_GLIBCXX_USE_CXX11_ABI=1' '-v' '-D' 'TORCH_API_INCLUDE_EXTENSION_H' '-D' 'PYBIND11_COMPILER_TYPE="_gcc"' '-D' 'PYBIND11_STDLIB="_libstdcpp"' '-D' 'PYBIND11_BUILD_ABI="_cxxabi1011"' '-D' 'TORCH_EXTENSION_NAME=quant_cuda_4bit' '-D' '_GLIBCXX_USE_CXX11_ABI=0' '-std=c++14' '-dumpdir' 'build/temp.linux-x86_64-3.9/quant_cuda_4bit.'
+/opt/cuda/cuda-11.7/bin/nvcc -I/cs/student/projects1/2021/cbarber/gptq/.venv/lib64/python3.9/site-packages/torch/include -I/cs/student/projects1/2021/cbarber/gptq/.venv/lib64/python3.9/site-packages/torch/include/torch/csrc/api/include -I/cs/student/projects1/2021/cbarber/gptq/.venv/lib64/python3.9/site-packages/torch/include/TH -I/cs/student/projects1/2021/cbarber/gptq/.venv/lib64/python3.9/site-packages/torch/include/THC -I/opt/cuda/cuda-11.7/include -I/cs/student/projects1/2021/cbarber/gptq/.venv/include -I/usr/include/python3.9 -c quant_cuda_kernel_4bit.cu -o build/temp.linux-x86_64-3.9/quant_cuda_kernel_4bit.o -D__CUDA_NO_HALF_OPERATORS__ -D__CUDA_NO_HALF_CONVERSIONS__ -D__CUDA_NO_BFLOAT16_CONVERSIONS__ -D__CUDA_NO_HALF2_OPERATORS__ --expt-relaxed-constexpr --compiler-options '-fPIC' -Xcompiler -D_GLIBCXX_USE_CXX11_ABI=1 -v -DTORCH_API_INCLUDE_EXTENSION_H -DPYBIND11_COMPILER_TYPE="_gcc" -DPYBIND11_STDLIB="_libstdcpp" -DPYBIND11_BUILD_ABI="_cxxabi1011" -DTORCH_EXTENSION_NAME=quant_cuda_4bit -D_GLIBCXX_USE_CXX11_ABI=0 -gencode=arch=compute_75,code=compute_75 -gencode=arch=compute_75,code=sm_75 -std=c++14
+#$ _NVVM_BRANCH_=nvvm
+#$ _SPACE_= 
+#$ _CUDART_=cudart
+#$ _HERE_=/opt/cuda/cuda-11.7/bin
+#$ _THERE_=/opt/cuda/cuda-11.7/bin
+#$ _TARGET_SIZE_=
+#$ _TARGET_DIR_=
+#$ _TARGET_DIR_=targets/x86_64-linux
+#$ TOP=/opt/cuda/cuda-11.7/bin/..
+#$ NVVMIR_LIBRARY_DIR=/opt/cuda/cuda-11.7/bin/../nvvm/libdevice
+#$ LD_LIBRARY_PATH=/opt/cuda/cuda-11.7/bin/../lib:/cs/student/projects1/2021/cbarber/gptq/.venv/lib/python3.9/site-packages/torch/lib:/opt/cuda/cuda-11.7/lib64:/cs/student/projects1/2021/cbarber/gptq/.venv/lib/python3.9/site-packages/torch/lib:/opt/cuda/cuda-11.7/lib64:/cs/student/projects1/2021/cbarber/gptq/.venv/lib/python3.9/site-packages/torch/lib:/opt/ucl/lib:/usr/X11R6/lib
+#$ PATH=/opt/cuda/cuda-11.7/bin/../nvvm/bin:/opt/cuda/cuda-11.7/bin:/cs/student/projects1/2021/cbarber/gptq/.venv/bin:/usr/share/Modules/bin:/cs/student/ug/2021/cbarber/.local/bin:/opt/ucl/bin:/opt/UCLCScourseware/bin:/usr/sbin:/sbin:/usr/bin:/bin:/usr/bin/X11:/opt/UCLCSdefunct/bin:/cs/student/ug/2021/cbarber/bin.intel:/cs/student/ug/2021/cbarber/bin:.:/usr/local/sbin:/opt/puppetlabs/bin:/opt/thinlinc/bin
+#$ INCLUDES="-I/opt/cuda/cuda-11.7/bin/../targets/x86_64-linux/include"  
+#$ LIBRARIES=  "-L/opt/cuda/cuda-11.7/bin/../targets/x86_64-linux/lib/stubs" "-L/opt/cuda/cuda-11.7/bin/../targets/x86_64-linux/lib"
+#$ CUDAFE_FLAGS=
+#$ PTXAS_FLAGS=
+#$ gcc -std=c++14 -D__CUDA_ARCH__=750 -D__CUDA_ARCH_LIST__=750 -E -x c++  -DCUDA_DOUBLE_MATH_FUNCTIONS -D__CUDACC__ -D__NVCC__ -D__CUDACC_RELAXED_CONSTEXPR__  '-fPIC' -D_GLIBCXX_USE_CXX11_ABI=1 -I"/cs/student/projects1/2021/cbarber/gptq/.venv/lib64/python3.9/site-packages/torch/include" -I"/cs/student/projects1/2021/cbarber/gptq/.venv/lib64/python3.9/site-packages/torch/include/torch/csrc/api/include" -I"/cs/student/projects1/2021/cbarber/gptq/.venv/lib64/python3.9/site-packages/torch/include/TH" -I"/cs/student/projects1/2021/cbarber/gptq/.venv/lib64/python3.9/site-packages/torch/include/THC" -I"/opt/cuda/cuda-11.7/include" -I"/cs/student/projects1/2021/cbarber/gptq/.venv/include" -I"/usr/include/python3.9" "-I/opt/cuda/cuda-11.7/bin/../targets/x86_64-linux/include"    -D "__CUDA_NO_HALF_OPERATORS__" -D "__CUDA_NO_HALF_CONVERSIONS__" -D "__CUDA_NO_BFLOAT16_CONVERSIONS__" -D "__CUDA_NO_HALF2_OPERATORS__" -D "TORCH_API_INCLUDE_EXTENSION_H" -D "PYBIND11_COMPILER_TYPE=\"_gcc\"" -D "PYBIND11_STDLIB=\"_libstdcpp\"" -D "PYBIND11_BUILD_ABI=\"_cxxabi1011\"" -D "TORCH_EXTENSION_NAME=quant_cuda_4bit" -D "_GLIBCXX_USE_CXX11_ABI=0" -D__CUDACC_VER_MAJOR__=11 -D__CUDACC_VER_MINOR__=7 -D__CUDACC_VER_BUILD__=64 -D__CUDA_API_VER_MAJOR__=11 -D__CUDA_API_VER_MINOR__=7 -D__NVCC_DIAG_PRAGMA_SUPPORT__=1 -include "cuda_runtime.h" -m64 "quant_cuda_kernel_4bit.cu" -o "/tmp/tmpxft_0004c7df_00000000-7_quant_cuda_kernel_4bit.cpp1.ii" 
+<command-line>: warning: "_GLIBCXX_USE_CXX11_ABI" redefined
+<command-line>: note: this is the location of the previous definition
+#$ cicc --c++14 --gnu_version=110500 --display_error_number --orig_src_file_name "quant_cuda_kernel_4bit.cu" --orig_src_path_name "/cs/student/projects1/2021/cbarber/gptq/quant_cuda_kernel_4bit.cu" --allow_managed --relaxed_constexpr   -arch compute_75 -m64 --no-version-ident -ftz=0 -prec_div=1 -prec_sqrt=1 -fmad=1 --include_file_name "tmpxft_0004c7df_00000000-3_quant_cuda_kernel_4bit.fatbin.c" -tused --gen_module_id_file --module_id_file_name "/tmp/tmpxft_0004c7df_00000000-4_quant_cuda_kernel_4bit.module_id" --gen_c_file_name "/tmp/tmpxft_0004c7df_00000000-6_quant_cuda_kernel_4bit.cudafe1.c" --stub_file_name "/tmp/tmpxft_0004c7df_00000000-6_quant_cuda_kernel_4bit.cudafe1.stub.c" --gen_device_file_name "/tmp/tmpxft_0004c7df_00000000-6_quant_cuda_kernel_4bit.cudafe1.gpu"  "/tmp/tmpxft_0004c7df_00000000-7_quant_cuda_kernel_4bit.cpp1.ii" -o "/tmp/tmpxft_0004c7df_00000000-6_quant_cuda_kernel_4bit.ptx"
+#$ ptxas -arch=sm_75 -m64  "/tmp/tmpxft_0004c7df_00000000-6_quant_cuda_kernel_4bit.ptx"  -o "/tmp/tmpxft_0004c7df_00000000-8_quant_cuda_kernel_4bit.sm_75.cubin" 
+#$ fatbinary -64 --cicc-cmdline="-ftz=0 -prec_div=1 -prec_sqrt=1 -fmad=1 " "--image3=kind=elf,sm=75,file=/tmp/tmpxft_0004c7df_00000000-8_quant_cuda_kernel_4bit.sm_75.cubin" "--image3=kind=ptx,sm=75,file=/tmp/tmpxft_0004c7df_00000000-6_quant_cuda_kernel_4bit.ptx" --embedded-fatbin="/tmp/tmpxft_0004c7df_00000000-3_quant_cuda_kernel_4bit.fatbin.c" 
+#$ rm /tmp/tmpxft_0004c7df_00000000-3_quant_cuda_kernel_4bit.fatbin
+#$ gcc -std=c++14 -D__CUDA_ARCH_LIST__=750 -E -x c++ -D__CUDACC__ -D__NVCC__ -D__CUDACC_RELAXED_CONSTEXPR__  '-fPIC' -D_GLIBCXX_USE_CXX11_ABI=1 -I"/cs/student/projects1/2021/cbarber/gptq/.venv/lib64/python3.9/site-packages/torch/include" -I"/cs/student/projects1/2021/cbarber/gptq/.venv/lib64/python3.9/site-packages/torch/include/torch/csrc/api/include" -I"/cs/student/projects1/2021/cbarber/gptq/.venv/lib64/python3.9/site-packages/torch/include/TH" -I"/cs/student/projects1/2021/cbarber/gptq/.venv/lib64/python3.9/site-packages/torch/include/THC" -I"/opt/cuda/cuda-11.7/include" -I"/cs/student/projects1/2021/cbarber/gptq/.venv/include" -I"/usr/include/python3.9" "-I/opt/cuda/cuda-11.7/bin/../targets/x86_64-linux/include"    -D "__CUDA_NO_HALF_OPERATORS__" -D "__CUDA_NO_HALF_CONVERSIONS__" -D "__CUDA_NO_BFLOAT16_CONVERSIONS__" -D "__CUDA_NO_HALF2_OPERATORS__" -D "TORCH_API_INCLUDE_EXTENSION_H" -D "PYBIND11_COMPILER_TYPE=\"_gcc\"" -D "PYBIND11_STDLIB=\"_libstdcpp\"" -D "PYBIND11_BUILD_ABI=\"_cxxabi1011\"" -D "TORCH_EXTENSION_NAME=quant_cuda_4bit" -D "_GLIBCXX_USE_CXX11_ABI=0" -D__CUDACC_VER_MAJOR__=11 -D__CUDACC_VER_MINOR__=7 -D__CUDACC_VER_BUILD__=64 -D__CUDA_API_VER_MAJOR__=11 -D__CUDA_API_VER_MINOR__=7 -D__NVCC_DIAG_PRAGMA_SUPPORT__=1 -include "cuda_runtime.h" -m64 "quant_cuda_kernel_4bit.cu" -o "/tmp/tmpxft_0004c7df_00000000-5_quant_cuda_kernel_4bit.cpp4.ii" 
+<command-line>: warning: "_GLIBCXX_USE_CXX11_ABI" redefined
+<command-line>: note: this is the location of the previous definition
+#$ cudafe++ --c++14 --gnu_version=110500 --display_error_number --orig_src_file_name "quant_cuda_kernel_4bit.cu" --orig_src_path_name "/cs/student/projects1/2021/cbarber/gptq/quant_cuda_kernel_4bit.cu" --allow_managed --relaxed_constexpr  --m64 --parse_templates --gen_c_file_name "/tmp/tmpxft_0004c7df_00000000-6_quant_cuda_kernel_4bit.cudafe1.cpp" --stub_file_name "tmpxft_0004c7df_00000000-6_quant_cuda_kernel_4bit.cudafe1.stub.c" --module_id_file_name "/tmp/tmpxft_0004c7df_00000000-4_quant_cuda_kernel_4bit.module_id" "/tmp/tmpxft_0004c7df_00000000-5_quant_cuda_kernel_4bit.cpp4.ii" 
+#$ gcc -std=c++14 -D__CUDA_ARCH__=750 -D__CUDA_ARCH_LIST__=750 -c -x c++  -DCUDA_DOUBLE_MATH_FUNCTIONS '-fPIC' -D_GLIBCXX_USE_CXX11_ABI=1 -I"/cs/student/projects1/2021/cbarber/gptq/.venv/lib64/python3.9/site-packages/torch/include" -I"/cs/student/projects1/2021/cbarber/gptq/.venv/lib64/python3.9/site-packages/torch/include/torch/csrc/api/include" -I"/cs/student/projects1/2021/cbarber/gptq/.venv/lib64/python3.9/site-packages/torch/include/TH" -I"/cs/student/projects1/2021/cbarber/gptq/.venv/lib64/python3.9/site-packages/torch/include/THC" -I"/opt/cuda/cuda-11.7/include" -I"/cs/student/projects1/2021/cbarber/gptq/.venv/include" -I"/usr/include/python3.9" "-I/opt/cuda/cuda-11.7/bin/../targets/x86_64-linux/include"   -m64 "/tmp/tmpxft_0004c7df_00000000-6_quant_cuda_kernel_4bit.cudafe1.cpp" -o "build/temp.linux-x86_64-3.9/quant_cuda_kernel_4bit.o" 
+creating build/lib.linux-x86_64-3.9
+g++ -shared -Wl,-z,relro -Wl,--as-needed -Wl,-z,now -g -Wl,-z,relro -Wl,--as-needed -Wl,-z,now -g build/temp.linux-x86_64-3.9/quant_cuda_4bit.o build/temp.linux-x86_64-3.9/quant_cuda_kernel_4bit.o -L/cs/student/projects1/2021/cbarber/gptq/.venv/lib64/python3.9/site-packages/torch/lib -L/opt/cuda/cuda-11.7/lib64 -L/usr/lib64 -lc10 -ltorch -ltorch_cpu -ltorch_python -lcudart -lc10_cuda -ltorch_cuda_cu -ltorch_cuda_cpp -o build/lib.linux-x86_64-3.9/quant_cuda_4bit.cpython-39-x86_64-linux-gnu.so
+creating build/bdist.linux-x86_64
+creating build/bdist.linux-x86_64/egg
+copying build/lib.linux-x86_64-3.9/quant_cuda_4bit.cpython-39-x86_64-linux-gnu.so -> build/bdist.linux-x86_64/egg
+creating stub loader for quant_cuda_4bit.cpython-39-x86_64-linux-gnu.so
+byte-compiling build/bdist.linux-x86_64/egg/quant_cuda_4bit.py to quant_cuda_4bit.cpython-39.pyc
+creating build/bdist.linux-x86_64/egg/EGG-INFO
+copying quant_cuda_4bit.egg-info/PKG-INFO -> build/bdist.linux-x86_64/egg/EGG-INFO
+copying quant_cuda_4bit.egg-info/SOURCES.txt -> build/bdist.linux-x86_64/egg/EGG-INFO
+copying quant_cuda_4bit.egg-info/dependency_links.txt -> build/bdist.linux-x86_64/egg/EGG-INFO
+copying quant_cuda_4bit.egg-info/top_level.txt -> build/bdist.linux-x86_64/egg/EGG-INFO
+writing build/bdist.linux-x86_64/egg/EGG-INFO/native_libs.txt
+zip_safe flag not set; analyzing archive contents...
+__pycache__.quant_cuda_4bit.cpython-39: module references __file__
+creating dist
+creating 'dist/quant_cuda_4bit-0.0.0-py3.9-linux-x86_64.egg' and adding 'build/bdist.linux-x86_64/egg' to it
+removing 'build/bdist.linux-x86_64/egg' (and everything under it)
+Processing quant_cuda_4bit-0.0.0-py3.9-linux-x86_64.egg
+creating /cs/student/projects1/2021/cbarber/gptq/.venv/lib/python3.9/site-packages/quant_cuda_4bit-0.0.0-py3.9-linux-x86_64.egg
+Extracting quant_cuda_4bit-0.0.0-py3.9-linux-x86_64.egg to /cs/student/projects1/2021/cbarber/gptq/.venv/lib/python3.9/site-packages
+Adding quant-cuda-4bit 0.0.0 to easy-install.pth file
+
+Installed /cs/student/projects1/2021/cbarber/gptq/.venv/lib/python3.9/site-packages/quant_cuda_4bit-0.0.0-py3.9-linux-x86_64.egg
+Processing dependencies for quant-cuda-4bit==0.0.0
+Finished processing dependencies for quant-cuda-4bit==0.0.0

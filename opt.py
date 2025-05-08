@@ -4,10 +4,30 @@ import os   # <-- Add import
 
 import torch
 import torch.nn as nn
+import math # Add math import
+import json # <-- Add import
+import os   # <-- Add import
 
 from gptq import *
 from modelutils import *
-from quant import get_quantizer
+# Import MinMaxQuantizer specifically, and other needed components
+from quant import get_quantizer, MinMaxQuantizer, Quant3Linear, make_quant3
+from quant.quant4linear import Quant4Linear, make_quant4 # Import 4-bit layer
+
+# Import CUDA modules
+try:
+    import quant_cuda
+    _quant_cuda_3bit_available = True
+except ImportError:
+    print("CUDA 3-bit kernel not found.")
+    _quant_cuda_3bit_available = False
+
+try:
+    import quant_cuda_4bit
+    _quant_cuda_4bit_available = True
+except ImportError:
+    print("CUDA 4-bit kernel not found.")
+    _quant_cuda_4bit_available = False
 
 
 def get_opt(model):
@@ -77,17 +97,19 @@ def opt_sequential(model, dataloader, quantizer_name, dev):
 
     print('Ready.')
 
-
-    quantizer = get_quantizer(quantizer_name)
-    quantizers = {}
+    # Get the constructor for the chosen quantizer
+    SpecificQuantizerClass = get_quantizer(quantizer_name)
+    quantizers_for_packing = {} # Store affine params (scale, zero) needed for packing
     for i in range(len(layers)):
+        log_print(f"\nProcessing layer {i}")
         layer = layers[i].to(dev)
 
         subset = find_layers(layer)
         gptq = {}
         for name in subset:
             gptq[name] = GPTQ(subset[name])
-            gptq[name].quantizer = quantizer()
+            # Instantiate the specific quantizer class obtained earlier
+            gptq[name].quantizer = SpecificQuantizerClass()
             gptq[name].quantizer.configure(
                 args.wbits, perchannel=True, sym=args.sym, mse=False, trits=args.trits
             )
@@ -105,13 +127,35 @@ def opt_sequential(model, dataloader, quantizer_name, dev):
             h.remove()
 
         for name in subset:
-            print(i, name)
-            print('Quantizing ...')
+            log_print(f"Layer {i}, Module {name}")
+            log_print('Running GPTQ + Quantization...')
+            # GPTQ uses the specific quantizer internally via gptq[name].quantizer
             gptq[name].fasterquant(
                 percdamp=args.percdamp, groupsize=args.groupsize, actorder=args.act_order, static_groups=args.static_groups
             )
-            quantizers['model.decoder.layers.%d.%s' % (i, name)] = gptq[name].quantizer
+
+            # --- Crucial Step: Get Affine Params for Packing ---
+            # The weight in subset[name] is now quantized by the specific method.
+            # We need to find the best affine representation (scale/zero) for this quantized weight.
+            W_quant = subset[name].weight.data.clone()
+            affine_quantizer = MinMaxQuantizer() # Use MinMax to find affine params
+            affine_quantizer.configure(args.wbits, perchannel=True, sym=args.sym)
+            # --- Crucial Step: Get Affine Params for Packing ---
+            # The weight in subset[name] is now quantized by the specific method.
+            # We need to find the best affine representation (scale/zero) for this quantized weight.
+            W_quant = subset[name].weight.data.clone()
+            affine_quantizer = MinMaxQuantizer() # Use MinMax to find affine params
+            affine_quantizer.configure(args.wbits, perchannel=True, sym=args.sym)
+            affine_quantizer.find_params(W_quant, weight=True) # Find params for W_quant
+
+            # Store the affine scale and zero point for packing later
+            layer_name_str = f'model.decoder.layers.{i}.{name}'
+            quantizers_for_packing[layer_name_str] = (affine_quantizer.scale.cpu(), affine_quantizer.zero.cpu())
+            # ----------------------------------------------------
+
             gptq[name].free()
+
+        # Run forward pass again to update output states (important for sequential application)
         for j in range(args.nsamples):
             outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask)[0]
 
@@ -123,12 +167,18 @@ def opt_sequential(model, dataloader, quantizer_name, dev):
         inps, outs = outs, inps
 
     model.config.use_cache = use_cache
-    
-    return quantizers
 
-@torch.no_grad()
-def opt_eval(model, testenc, dev):
-    print('Evaluating ...')
+    # Return the dictionary containing affine parameters needed for packing
+    return quantizers_for_packing
+
+# opt_eval function is no longer used and will be removed.
+# @torch.no_grad()
+# def opt_eval(model, testenc, dev):
+    # ... (contents of opt_eval) ...
+
+# benchmark_kernels function is no longer used and will be removed.
+# def benchmark_kernels(args, dev):
+    # ... (contents of benchmark_kernels) ...
 
     testenc = testenc.input_ids
     nsamples = testenc.numel() // model.seqlen
@@ -188,7 +238,8 @@ def opt_eval(model, testenc, dev):
         if args.nearest:
             subset = find_layers(layer)
             for name in subset:
-                quantizer = Quantizer()
+                # Use the imported MinMaxQuantizer
+                quantizer = MinMaxQuantizer()
                 quantizer.configure(
                     args.wbits, perchannel=True, sym=args.sym, mse=False
                 )
@@ -233,10 +284,129 @@ def opt_eval(model, testenc, dev):
 
     model.config.use_cache = use_cache
 
-    return ppl.item() # Return the perplexity
+
+    # --- Benchmark Dimensions (from test_kernel.py) ---
+    M_BENCH = 12288 * 4 # Input features (e.g., OPT-175B FFN)
+    N_BENCH = 12288     # Output features
+    COUNT = 1000        # Number of iterations
+
+    # --- Setup Data ---
+    DTYPE_FP16 = torch.half
+    DTYPE_FLOAT = torch.float
+    vec_fp16 = torch.randn((1, M_BENCH), device=dev, dtype=DTYPE_FP16)
+    vec_f32 = vec_fp16.float()
+    mul_fp16 = torch.zeros((1, N_BENCH), device=dev, dtype=DTYPE_FP16)
+    mul_f32 = torch.zeros((1, N_BENCH), device=dev, dtype=DTYPE_FLOAT)
+
+    # --- FP16 Baseline (Optional but good reference) ---
+    print("\n--- FP16 PyTorch Benchmark ---")
+    mat_fp16 = torch.randn((M_BENCH, N_BENCH), device=dev, dtype=DTYPE_FP16)
+    tick = time.time()
+    for _ in range(COUNT):
+        torch.matmul(vec_fp16, mat_fp16, out=mul_fp16)
+        torch.cuda.synchronize()
+    print(f'FP16 MatVec Time: {(time.time() - tick) / COUNT:.6f} seconds')
+    del mat_fp16, mul_fp16 # Free memory
+
+    # --- 3-bit Benchmark ---
+    if _quant_cuda_3bit_available:
+        print("\n--- 3-bit Kernel Benchmark ---")
+        packed_height_3bit = M_BENCH // 32 * 3
+        mat_int3_packed = torch.randint(-1000000000, 1000000000, (packed_height_3bit, N_BENCH), device=dev, dtype=torch.int)
+        scales_3bit = torch.randn(N_BENCH, device=dev, dtype=DTYPE_FLOAT)
+        zeros_3bit = torch.randn(N_BENCH, device=dev, dtype=DTYPE_FLOAT) # zero_point * scale
+
+        # Benchmark standard 3-bit kernel (FP32 input)
+        mul_f32.zero_()
+        tick = time.time()
+        for _ in range(COUNT):
+            quant_cuda.vecquant3matmul(vec_f32, mat_int3_packed, mul_f32, scales_3bit, zeros_3bit)
+            torch.cuda.synchronize()
+        print(f'3-bit MatVec Time (FP32 in): {(time.time() - tick) / COUNT:.6f} seconds')
+
+        # Benchmark faster 3-bit kernel (FP16 input -> FP32 output)
+        mul_f32.zero_()
+        tick = time.time()
+        for _ in range(COUNT):
+            quant_cuda.vecquant3matmul_faster(vec_fp16, mat_int3_packed, mul_f32, scales_3bit, zeros_3bit)
+            torch.cuda.synchronize()
+        print(f'3-bit MatVec Time (Faster, FP16 in): {(time.time() - tick) / COUNT:.6f} seconds')
+        del mat_int3_packed, scales_3bit, zeros_3bit # Free memory
+    else:
+        print("\nSkipping 3-bit kernel benchmark (CUDA module not found).")
+
+    # --- 4-bit Benchmark ---
+    if _quant_cuda_4bit_available:
+        print("\n--- 4-bit Kernel Benchmark ---")
+        # Ensure M_BENCH is divisible by 8
+        if M_BENCH % 8 != 0:
+             print(f"Warning: M_BENCH ({M_BENCH}) not divisible by 8. Adjusting for benchmark.")
+             M_BENCH_4BIT = (M_BENCH // 8) * 8
+             vec_fp16_4b = vec_fp16[:, :M_BENCH_4BIT]
+             vec_f32_4b = vec_f32[:, :M_BENCH_4BIT]
+        else:
+             M_BENCH_4BIT = M_BENCH
+             vec_fp16_4b = vec_fp16
+             vec_f32_4b = vec_f32
+
+        packed_height_4bit = M_BENCH_4BIT // 8
+        min_int32 = -(2**31)
+        max_int32_exclusive = 2**31
+        mat_int4_packed = torch.randint(min_int32, max_int32_exclusive, (packed_height_4bit, N_BENCH), device=dev, dtype=torch.int32)
+        scales_4bit_f32 = torch.randn(N_BENCH, device=dev, dtype=DTYPE_FLOAT)
+        zeros_4bit_f32 = torch.randn(N_BENCH, device=dev, dtype=DTYPE_FLOAT) # zero_point * scale
+        scales_4bit_f16 = scales_4bit_f32.half()
+        zeros_4bit_f16 = zeros_4bit_f32.half()
+
+        # Benchmark standard 4-bit kernel (FP32 input -> FP32 output)
+        mul_f32.zero_()
+        tick = time.time()
+        for _ in range(COUNT):
+            quant_cuda_4bit.vecquant4matmul(vec_f32_4b, mat_int4_packed, mul_f32, scales_4bit_f32, zeros_4bit_f32)
+            torch.cuda.synchronize()
+        print(f'4-bit MatVec Time (FP32 in -> FP32 out): {(time.time() - tick) / COUNT:.6f} seconds')
+
+        # Benchmark standard 4-bit kernel (FP16 input -> FP32 output)
+        mul_f32.zero_()
+        tick = time.time()
+        for _ in range(COUNT):
+            quant_cuda_4bit.vecquant4matmul(vec_fp16_4b, mat_int4_packed, mul_f32, scales_4bit_f16, zeros_4bit_f16)
+            torch.cuda.synchronize()
+        print(f'4-bit MatVec Time (FP16 in -> FP32 out): {(time.time() - tick) / COUNT:.6f} seconds')
+
+        # Benchmark faster 4-bit kernel (FP16 input -> FP32 output)
+        mul_f32.zero_()
+        tick = time.time()
+        for _ in range(COUNT):
+            quant_cuda_4bit.vecquant4matmul_faster(vec_fp16_4b, mat_int4_packed, mul_f32, scales_4bit_f32, zeros_4bit_f32)
+            torch.cuda.synchronize()
+        print(f'4-bit MatVec Time (Faster, FP16 in -> FP32 out): {(time.time() - tick) / COUNT:.6f} seconds')
+        del mat_int4_packed, scales_4bit_f32, zeros_4bit_f32, scales_4bit_f16, zeros_4bit_f16 # Free memory
+    else:
+        print("\nSkipping 4-bit kernel benchmark (CUDA module not found).")
 
 # TODO: perform packing on GPU
-def opt_pack3(model, quantizers):
+def opt_pack3(model, quantizers_with_w):
+    """Packs OPT model weights into 3-bit Quant3Linear layers."""
+    # Create a new dict containing only (scale, zero) needed by make_quant3
+    quantizers_for_make = {
+        name: (params[1], params[2]) # Extract scale (index 1) and zero (index 2)
+        for name, params in quantizers_with_w.items()
+    }
+    layers = find_layers(model)
+    layers = {n: layers[n] for n in quantizers_for_make} # Use keys from the new dict
+    make_quant3(model, quantizers_for_make, faster=args.faster_kernel)
+    qlayers = find_layers(model, [Quant3Linear])
+    print('Packing 3-bit ...')
+    for name in qlayers:
+        print(name)
+        # Get scale and zero from the dict passed to make_quant3
+        scale, zero = quantizers_for_make[name]
+        # Ensure scale/zero are on the correct device for pack
+        target_device = qlayers[name].qweight.device
+        qlayers[name].pack(layers[name], scale.to(target_device), zero.to(target_device))
+    print('Done.')
+    return model
     layers = find_layers(model)
     layers = {n: layers[n] for n in quantizers}
     make_quant3(model, quantizers, faster=args.faster_kernel)
@@ -248,6 +418,35 @@ def opt_pack3(model, quantizers):
         qlayers[name].pack(layers[name], quantizers[name].scale, quantizers[name].zero)
     print('Done.')
     return model
+
+# Added function for 4-bit packing
+def opt_pack4(model, quantizers):
+    """Packs OPT model weights into 4-bit Quant4Linear layers."""
+    layers = find_layers(model)
+    layers = {n: layers[n] for n in quantizers}
+    make_quant4(model, quantizers, faster=args.faster_kernel) # Use make_quant4
+    qlayers = find_layers(model, [Quant4Linear]) # Find Quant4Linear layers
+    print('Packing 4-bit ...')
+    for name in qlayers:
+        print(name)
+        # Unpack the (scale, zero) tuple from the quantizers dictionary
+        scale_cpu, zero_cpu = quantizers[name]
+        target_device = qlayers[name].qweight.device
+
+        # Ensure scale and zero (integer zero point) are on the target device
+        scale = scale_cpu.to(target_device)
+        zero = zero_cpu.to(target_device)
+
+        # Get the corresponding original layer weights (needed by pack)
+        # Note: layers[name] still holds the original nn.Linear instance
+        original_linear_layer = layers[name]
+
+        # Pack using the original layer, the scale/zero from the GPTQ quantizer
+        # The pack method will internally re-quantize the original weights using these exact params
+        qlayers[name].pack(original_linear_layer, scale, zero)
+    print('Done.')
+    return model
+
 
 def load_quant3(model, checkpoint):
     from transformers import OPTConfig, OPTForCausalLM 
@@ -276,6 +475,40 @@ def load_quant3(model, checkpoint):
     print('Done.')
 
     return model
+
+# Added function for loading 4-bit model
+def load_quant4(model_path, checkpoint_path, faster=False):
+    """Loads a 4-bit quantized OPT model."""
+    from transformers import OPTConfig, OPTForCausalLM
+    config = OPTConfig.from_pretrained(model_path)
+    def noop(*args, **kwargs):
+        pass
+    torch.nn.init.kaiming_uniform_ = noop
+    torch.nn.init.uniform_ = noop
+    torch.nn.init.normal_ = noop
+
+    torch.set_default_dtype(torch.half)
+    transformers.modeling_utils._init_weights = False
+    torch.set_default_dtype(torch.half)
+    model = OPTForCausalLM(config)
+    torch.set_default_dtype(torch.float)
+    model = model.eval()
+    layers = find_layers(model)
+    # Exclude layers that are usually not quantized
+    for name in ['model.decoder.project_out', 'model.decoder.project_in', 'lm_head']:
+        if name in layers:
+            del layers[name]
+    make_quant4(model, layers, faster=faster) # Use make_quant4
+
+    print('Loading 4-bit model ...')
+    if checkpoint_path:
+         model.load_state_dict(torch.load(checkpoint_path))
+    else:
+         print("Warning: No checkpoint path provided for load_quant4. Model weights are initialized but not loaded.")
+    model.seqlen = model.config.max_position_embeddings
+    print('Done.')
+    return model
+
 
 def opt_multigpu(model, gpus):
     model.model.decoder.embed_tokens = model.model.decoder.embed_tokens.to(gpus[0])
@@ -357,9 +590,11 @@ def benchmark(model, input_ids, check=False):
             del out
         sync()
         import numpy as np
-        print('Median:', np.median(times))
+        median_time = np.median(times)
+        print('Median Latency (ms):', median_time * 1000) # Print in ms
         if check:
             print('PPL:', torch.exp(tot / (input_ids.numel() - 1)).item())
+        return median_time
 
 
 if __name__ == '__main__':
@@ -452,8 +687,25 @@ if __name__ == '__main__':
         '--quiet', action='store_true',
         help='Reduce verbose logging during quantization and evaluation.'
     )
+    # Remove benchmark-kernels, use --benchmark for model inference benchmark
+    # parser.add_argument(
+    #     '--benchmark-kernels', action='store_true',
+    #     help='Run low-level CUDA kernel benchmarks instead of model evaluation.'
+    # )
 
     args = parser.parse_args()
+
+    # --- Argument Validation ---
+    if args.wbits not in [3, 4, 16]:
+        raise ValueError("Only 3, 4, or 16 bits supported for --wbits with kernel evaluation.")
+    if args.wbits == 3 and not _quant_cuda_3bit_available:
+        raise ImportError("3-bit quantization requested, but 3-bit CUDA kernel not found. Build it first.")
+    if args.wbits == 4 and not _quant_cuda_4bit_available:
+        raise ImportError("4-bit quantization requested, but 4-bit CUDA kernel not found. Build it first.")
+    if args.load and args.save:
+        raise ValueError("Cannot specify both --load and --save")
+    if args.nearest:
+        print("Warning: --nearest flag is ignored when wbits < 16 in this script.")
 
     # Define DEV globally or pass args around if needed
     DEV = torch.device('cuda:0') # Assumes CUDA_VISIBLE_DEVICES handles mapping
@@ -471,65 +723,179 @@ if __name__ == '__main__':
     # Example: Replace print('Quantizing ...') with log_print('Quantizing ...') in opt_sequential
     # Example: Replace print(i) with log_print(i) in opt_eval
 
+    # --- Run Kernel Benchmark if requested ---
+    # Removed kernel benchmark section, use --benchmark for model benchmark
+
+    # --- Main Logic ---
+    fp16_model_size_mb = None
+    fp16_median_latency_ms = None
+    quantized_model_size_mb = None
+    quantized_median_latency_ms = None
+
     if args.load:
-        model = load_quant3(args.model, args.load)
+        log_print(f"Loading quantized model from: {args.load}")
+        if args.wbits == 3:
+            model = load_quant3(args.model, args.load)
+        elif args.wbits == 4:
+            # Pass faster_kernel flag to load_quant4
+            model = load_quant4(args.model, args.load, faster=args.faster_kernel)
+        else:
+            # Should not happen due to arg validation, but good practice
+             raise ValueError(f"Loading model with {args.wbits} bits not supported.")
+        model.eval() # Ensure model is in eval mode
     else:
+        # Load FP16 model for quantization or baseline eval
         model = get_opt(args.model)
         model.eval()
 
-    dataloader, testloader = get_loaders(
+        if args.wbits < 16: # If we are going to quantize, get original FP16 size first
+            log_print("Getting FP16 model size for comparison...")
+            temp_fp16_save_path = "temp_fp16_model_for_size_check.pt"
+            torch.save(model.state_dict(), temp_fp16_save_path)
+            fp16_model_size_mb = os.path.getsize(temp_fp16_save_path) / (1024 * 1024)
+            log_print(f"Original FP16 model size: {fp16_model_size_mb:.2f} MB")
+            os.remove(temp_fp16_save_path)
+
+    dataloader, testloader = get_loaders( # testloader not used if opt_eval is removed
         args.dataset, nsamples=args.nsamples, seed=args.seed, model=args.model, seqlen=model.seqlen
     )
 
-    quantizers = None # Initialize quantizers
-    if args.wbits < 16 and not args.nearest:
+    # quantizers variable is used by opt_pack3/4, but its content is now from affine_quantizers
+    # affine_quantizers will store the direct quantizer objects from opt_sequential
+    affine_quantizers = None
+    if args.wbits < 16 and not args.load and not args.nearest: # Only quantize if not loading and wbits < 16
         tick = time.time()
-        # Pass log_print or args if needed inside opt_sequential
-        quantizers = opt_sequential(model, dataloader, args.quantizer, DEV)
+        affine_quantizers = opt_sequential(model, dataloader, args.quantizer, DEV)
         log_print(f"Quantization time: {time.time() - tick:.2f}s")
 
-    if args.benchmark:
+        # Pack the model using the obtained affine quantizers
+        log_print("Packing model weights...")
+        if args.wbits == 3:
+            model = opt_pack3(model, affine_quantizers)
+        elif args.wbits == 4:
+            model = opt_pack4(model, affine_quantizers)
+        log_print("Packing complete.")
+
+        # --- Convert non-quantized modules to FP32 ---
+        log_print("Converting remaining modules to FP32...")
+        model.model.decoder.embed_tokens = model.model.decoder.embed_tokens.float()
+        model.model.decoder.embed_positions = model.model.decoder.embed_positions.float()
+        if hasattr(model.model.decoder, 'project_in') and model.model.decoder.project_in:
+            model.model.decoder.project_in = model.model.decoder.project_in.float()
+        if hasattr(model.model.decoder, 'project_out') and model.model.decoder.project_out:
+            model.model.decoder.project_out = model.model.decoder.project_out.float()
+        if model.model.decoder.final_layer_norm is not None:
+             model.model.decoder.final_layer_norm = model.model.decoder.final_layer_norm.float()
+        # Convert LayerNorms within the OPTDecoderLayers that were not replaced
+        for layer in model.model.decoder.layers:
+             if isinstance(layer.self_attn_layer_norm, nn.LayerNorm):
+                  layer.self_attn_layer_norm = layer.self_attn_layer_norm.float()
+             if isinstance(layer.final_layer_norm, nn.LayerNorm):
+                  layer.final_layer_norm = layer.final_layer_norm.float()
+        model.lm_head = model.lm_head.float()
+        log_print("Module conversion complete.")
+
+
+    # --- Benchmarking ---
+    if args.benchmark > 0:
+        log_print(f"Benchmarking inference speed with {args.benchmark} tokens...")
         gpus = [torch.device('cuda:%d' % i) for i in range(torch.cuda.device_count())]
         if len(gpus) > 1:
-            opt_multigpu(model, gpus)
+            opt_multigpu(model, gpus) # Handles moving model to gpus
         else:
             model = model.to(DEV)
-        if args.benchmark:
+
+        # Use dataloader for benchmark input
+        # Ensure dataloader is not exhausted if used multiple times; re-initialize if necessary
+        # For simplicity, assume dataloader can be iterated once here.
+        try:
             input_ids = next(iter(dataloader))[0][:, :args.benchmark]
-            benchmark(model, input_ids, check=args.check)
-    if args.load:
-        exit()
+        except StopIteration:
+            log_print("Dataloader exhausted for benchmark, re-initializing.")
+            dataloader, _ = get_loaders(
+                args.dataset, nsamples=args.nsamples, seed=args.seed, model=args.model, seqlen=model.seqlen
+            )
+            input_ids = next(iter(dataloader))[0][:, :args.benchmark]
 
-    # Evaluation Loop
-    evaluation_results = {}
-    datasets = ['wikitext2', 'ptb', 'c4']
-    if args.new_eval:
-      datasets = ['wikitext2', 'ptb-new', 'c4-new']
-    for dataset in datasets:
-        dataloader, testloader = get_loaders(
-            dataset, seed=args.seed, model=args.model, seqlen=model.seqlen
-        )
-        print(f"Evaluating on: {dataset}") # Keep this print for clarity
-        # Pass log_print or args if needed inside opt_eval
-        ppl = opt_eval(model, testloader, DEV)
-        print(f"Perplexity: {ppl:.4f}") # Keep this print for immediate feedback
-        evaluation_results[dataset] = ppl
+        median_time_sec = benchmark(model, input_ids, check=args.check)
+        if args.wbits == 16:
+            fp16_median_latency_ms = median_time_sec * 1000
+        else:
+            quantized_median_latency_ms = median_time_sec * 1000
+        log_print("Benchmarking complete.")
 
-    # Save results if output file specified
+    # --- Perplexity Evaluation Removed ---
+    # log_print(f"Moving model to primary device {DEV} for evaluation...")
+    # model.to(DEV)
+    # log_print("Model moved.")
+    # evaluation_results = {} # No PPL results
+    # datasets = ['wikitext2', 'ptb', 'c4']
+    # if args.new_eval:
+    #   datasets = ['wikitext2', 'ptb-new', 'c4-new']
+    # for dataset in datasets:
+    #     _, testloader = get_loaders( # Only need testloader if opt_eval was used
+    #         dataset, seed=args.seed, model=args.model, seqlen=model.seqlen
+    #     )
+    #     print(f"Evaluating on: {dataset}")
+    #     ppl = opt_eval(model, testloader, DEV) # opt_eval is removed
+    #     print(f"Perplexity: {ppl:.4f}")
+    #     evaluation_results[dataset] = ppl
+
+    # --- Save Model and Report Size ---
+    if args.save:
+        log_print(f"Saving model to {args.save} ...")
+        model.cpu() # Ensure model is on CPU before saving
+        torch.save(model.state_dict(), args.save)
+        log_print("Model saved.")
+        try:
+            saved_model_size_mb = os.path.getsize(args.save) / (1024 * 1024)
+            if args.wbits == 16:
+                fp16_model_size_mb = saved_model_size_mb
+                log_print(f"FP16 model file size: {fp16_model_size_mb:.2f} MB")
+            else:
+                quantized_model_size_mb = saved_model_size_mb
+                log_print(f"Quantized model file size: {quantized_model_size_mb:.2f} MB")
+                if fp16_model_size_mb is not None: # If FP16 size was captured in this run
+                    reduction = ((fp16_model_size_mb - quantized_model_size_mb) / fp16_model_size_mb) * 100
+                    log_print(f"Size reduction vs FP16: {reduction:.2f}%")
+        except Exception as e:
+            log_print(f"Could not determine file size: {e}")
+
+    # --- Log results to JSON file ---
     if args.output_file:
         output_data = {
             'model': args.model,
-            'quantizer': args.quantizer,
+            'quantizer': args.quantizer if args.wbits < 16 else 'fp16',
             'wbits': args.wbits,
-            'groupsize': args.groupsize,
-            'sym': args.sym,
-            'percdamp': args.percdamp,
-            'act_order': args.act_order,
-            'static_groups': args.static_groups,
-            'trits': args.trits,
-            'results': evaluation_results
+            'groupsize': args.groupsize if args.wbits < 16 else -1,
+            'sym': args.sym if args.wbits < 16 else False,
+            'percdamp': args.percdamp if args.wbits < 16 else -1,
+            'act_order': args.act_order if args.wbits < 16 else False,
+            'timestamp': time.strftime("%Y-%m-%d %H:%M:%S")
         }
-        # Append results as a new line in JSON Lines format
+        if fp16_median_latency_ms is not None:
+            output_data['fp16_median_latency_ms'] = fp16_median_latency_ms
+        if quantized_median_latency_ms is not None:
+            output_data['quantized_median_latency_ms'] = quantized_median_latency_ms
+        if fp16_model_size_mb is not None: # This is the one captured at the start of a quant run or during fp16 run
+            output_data['fp16_model_size_mb'] = fp16_model_size_mb
+        if quantized_model_size_mb is not None:
+            output_data['quantized_model_size_mb'] = quantized_model_size_mb
+
+        # evaluation_results is removed as PPL is not calculated
+        # output_data['results'] = evaluation_results
+
+        mode = 'a' if os.path.exists(args.output_file) else 'w'
+        try:
+            with open(args.output_file, mode) as f:
+                f.write(json.dumps(output_data) + '\n')
+            log_print(f"Results / metrics logged to {args.output_file}")
+        except IOError as e:
+            log_print(f"Error writing to output file {args.output_file}: {e}")
+
+    # --- Save Model and Report Size (Old block removed, integrated above) ---
+    # if args.save:
+    #     log_print(f"Saving quantized model to {args.save} ...")
         mode = 'a' if os.path.exists(args.output_file) else 'w'
         try:
             with open(args.output_file, mode) as f:
@@ -538,7 +904,21 @@ if __name__ == '__main__':
         except IOError as e:
             print(f"Error writing to output file {args.output_file}: {e}")
 
-
-    if args.save and quantizers is not None: # Ensure quantizers exist before packing
-        opt_pack3(model, quantizers)
+    # --- Save Model and Report Size ---
+    if args.save:
+        log_print(f"Saving quantized model to {args.save} ...")
+        # Ensure model is on CPU before saving to avoid GPU memory in file
+        model.cpu()
         torch.save(model.state_dict(), args.save)
+        log_print("Model saved.")
+        try:
+            file_size_mb = os.path.getsize(args.save) / (1024 * 1024)
+            log_print(f"Quantized model file size: {file_size_mb:.2f} MB")
+            # Optionally compare to FP16 size (requires loading original model again)
+            # model_fp16 = get_opt(args.model)
+            # torch.save(model_fp16.state_dict(), "temp_fp16.pt")
+            # fp16_size_mb = os.path.getsize("temp_fp16.pt") / (1024 * 1024)
+            # log_print(f"Original FP16 model file size: {fp16_size_mb:.2f} MB")
+            # os.remove("temp_fp16.pt")
+        except Exception as e:
+            log_print(f"Could not determine file size: {e}")
