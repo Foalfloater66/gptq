@@ -231,7 +231,6 @@ def opt_eval(model, testenc, dev):
 
     model.config.use_cache = use_cache
 
-# TODO: perform packing on GPU
 def opt_pack3(model, quantizers):
     layers = find_layers(model)
     layers = {n: layers[n] for n in quantizers}
@@ -440,8 +439,6 @@ if __name__ == '__main__':
         '--quantizer', type=str, choices=['uniform_minmax', 'logarithm', 'quantile', 'kmeans', 'apot', 'lloydmax'], default='uniform_minmax',
         help="Which parameter quantizer to use.",
     )
-
-    # NOTE: add the quantizer here.
 
     args = parser.parse_args()
 

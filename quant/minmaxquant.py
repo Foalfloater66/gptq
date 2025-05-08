@@ -4,12 +4,11 @@ import torch.nn as nn
 
 
 def quantize(x, scale, zero, maxq):
-    if maxq < 0: # only if trits(?) is enabled. Not relevant.
+    if maxq < 0: # only if trits is enabled.
         return (x > scale / 2).float() * scale + (x < zero / 2).float() * zero
     q = torch.clamp(torch.round(x / scale) + zero, 0, maxq) # affine quantization scheme.
     return scale * (q - zero)  # affine quantization scheme: https://huggingface.co/docs/optimum/en/concept_guides/quantization 
 
-# TODO (@Morgane): separate into different classes for different types of quantization.
 class Quantizer(nn.Module):
 
     def __init__(self, shape=1):
@@ -26,10 +25,10 @@ class Quantizer(nn.Module):
         trits=False
     ):
         """Sets up the number of bits, the norm, the grid size, the maxshrink, and the `perchannel`, `sym`, `mse`, and `trits` booleans."""
-        self.maxq = torch.tensor(2 ** bits - 1)  # maxmium possible value in a bit.
-        self.perchannel = perchannel  # if enabled, for each dimension, the values in the tensor are quantized with different quantization parameters (less errors).
-        self.sym = sym # not needed for us.
-        self.mse = mse # not needed for us.
+        self.maxq = torch.tensor(2 ** bits - 1)  
+        self.perchannel = perchannel  
+        self.sym = sym 
+        self.mse = mse 
         self.norm = norm # only for MSE = True
         self.grid = grid  # only for MSE = True
         self.maxshrink = maxshrink  # only for MSE = True
@@ -46,56 +45,45 @@ class Quantizer(nn.Module):
         dev = x.device
         self.maxq = self.maxq.to(dev)
 
-        shape = x.shape  # shape of the vector.
-        # In all of the below examples, the tensor is made 2-dimensional.
-        if self.perchannel: # good for CNNs.
-            # if "per channel" is enabled, and "weight" is NOT enabled, then the tranpose is retrieved.
-            if weight: # whether the current tensor is a weight or not.
-                x = x.flatten(1)  # ensures the tensor is 2-dimensional while keeping the batch dimension.
+        shape = x.shape
+        if self.perchannel:
+            if weight: 
+                x = x.flatten(1)  
             else:
-                # NOTE: we don't worry about the below. This is for different types of quantization
                 if len(shape) == 4:
-                    x = x.permute([1, 0, 2, 3]) # switches the first dimension with the second dimension (gets the tranpose with respect to those dimensions only).
-                    x = x.flatten(1)  # ensures the tensor is 2-dimensional.
+                    x = x.permute([1, 0, 2, 3]) 
+                    x = x.flatten(1)  
                 if len(shape) == 3:
-                    x = x.reshape((-1, shape[-1])).t() # makes the tensor into a 2-d tensor, and gets the tranpose.
+                    x = x.reshape((-1, shape[-1])).t() 
                 if len(shape) == 2:
-                    x = x.t()  # returns transpose.
+                    x = x.t()  
         else:
-            x = x.flatten().unsqueeze(0) # makes it into a 2-d matrix and treat it as one batch.
+            x = x.flatten().unsqueeze(0) 
 
-        # STEP 2: Get the minimum and maximum values across each vector in the second dimension.
-        tmp = torch.zeros(x.shape[0], device=dev)  # set of 0s to clamp the values 
-        xmin = torch.minimum(x.min(1)[0], tmp)  # get the minimum values across the 2nd dimension. (for each batch.)
-        xmax = torch.maximum(x.max(1)[0], tmp)  # get the maximum value across the 2nd dimension. (for each batch.)
+        tmp = torch.zeros(x.shape[0], device=dev) 
+        xmin = torch.minimum(x.min(1)[0], tmp)  
+        xmax = torch.maximum(x.max(1)[0], tmp)  
 
-        if self.sym:  # enable symmetric mapping.
+        if self.sym:  
             xmax = torch.maximum(torch.abs(xmin), xmax)
             tmp = xmin < 0
             if torch.any(tmp):
                 xmin[tmp] = -xmax[tmp]
-        # where min and max are both zero, simply set them to -1 and +1.
         tmp = (xmin == 0) & (xmax == 0)
         xmin[tmp] = -1
         xmax[tmp] = +1
 
-        if self.maxq < 0: # if the maximum quantization value is negative (NOTE to self: HOW WOULD THAT HAPPEN?)
-          self.scale = xmax # the scale is the max value vector.
-          self.zero = xmin # "zero" is mapped to the min value vector.
+        if self.maxq < 0: 
+          self.scale = xmax 
+          self.zero = xmin 
         else:
-          # scale is the difference divided by the maximum possible size.
           self.scale = (xmax - xmin) / self.maxq
           if self.sym:
-              # if it's symmetric, zero is set to be this.
               self.zero = torch.full_like(self.scale, (self.maxq + 1) / 2)
           else:
-              # if it's asymmetric, zero is set to be this.
               self.zero = torch.round(-xmin / self.scale)
 
 
-        #  PER ROW QUANTIZATION  #
-        # ---------------------- #
-        #  Code for OBQ. Not used in the GPTQ paper experiments.
         if self.mse:
             best = torch.full([x.shape[0]], float('inf'), device=dev)  
             for i in range(int(self.maxshrink * self.grid)):
@@ -115,22 +103,20 @@ class Quantizer(nn.Module):
                     self.scale[tmp] = scale1[tmp]
                     self.zero[tmp] = zero1[tmp]
     
-        # if not a convolutional layer
         if not self.perchannel:
-            if weight: # weight layer
+            if weight: 
                 tmp = shape[0]
-            else: # non-weight layer (e.g. activation layer)
+            else:
                 tmp = shape[1] if len(shape) != 3 else shape[2]
             self.scale = self.scale.repeat(tmp)
             self.zero = self.zero.repeat(tmp)
 
         if weight:
-            shape = [-1] + [1] * (len(shape) - 1) # shape: [-1, <1 for every dimension after the first dimension.]
+            shape = [-1] + [1] * (len(shape) - 1) 
             self.scale = self.scale.reshape(shape)
             self.zero = self.zero.reshape(shape)
             return
         
-        # if, for example, it's a convolutional layer.
         if len(shape) == 4:
             self.scale = self.scale.reshape((1, -1, 1, 1))
             self.zero = self.zero.reshape((1, -1, 1, 1))

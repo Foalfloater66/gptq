@@ -6,7 +6,6 @@ class QuantizerInterface(ABC, nn.Module):
 
     def __init__(self):
         super(QuantizerInterface, self).__init__()
-        # pass
 
     @abstractmethod
     def configure(self):
@@ -22,11 +21,6 @@ class QuantizerInterface(ABC, nn.Module):
     def quantize(self, x):
         """Quantize the matrix `x`."""
         pass
-
-    # @abstractmethod
-    # def enabled(self):
-    #     # NOTE: I don't know what this is.
-    #     pass
 
     @abstractmethod
     def ready(self):

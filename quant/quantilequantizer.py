@@ -26,7 +26,7 @@ class QuantileQuantizer(QuantizerInterface):
     def quantize(self, x):
         if self.ready():
             quantization_lvls = self.quantization_lvls
-            x_flat = x.flatten(1).unsqueeze(2)  # Flatten only the first dimension and add a dimension for broadcasting
+            x_flat = x.flatten(1).unsqueeze(2) 
             qlvls_shape = quantization_lvls.shape
             quantization_lvls = quantization_lvls.reshape(qlvls_shape[0], 1, qlvls_shape[1])
             diffs = (quantization_lvls - x_flat).abs() 

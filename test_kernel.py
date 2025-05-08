@@ -2,6 +2,10 @@ import torch
 import torch.nn as nn
 
 import quant_cuda
+from quant import Quant3Linear
+from quant import affine_quantize as quantize
+from quant import MinMaxQuantizer as Quantizer
+
 
 torch.backends.cuda.matmul.allow_tf32 = False
 torch.backends.cudnn.allow_tf32 = False
