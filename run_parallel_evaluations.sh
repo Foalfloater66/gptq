@@ -5,10 +5,10 @@ MODEL="bigscience/bloom-560m"  # Model to evaluate (e.g., BLOOM 560m)
 DATASET="wikitext2"       # Calibration dataset
 WBITS=4                   # Bit width for quantization (adjust as needed)
 NSAMPLES=128              # Number of calibration samples
-OUTPUT_FILE="bloom560m_w${WBITS}_eval_results.jsonl" # Output file for results (using .jsonl)
+OUTPUT_FILE="bloom560m_w${WBITS}_eval_results.json" # Output file for results (using .jsonl)
 # Common flags for bloom.py (adjust as needed)
 # Note: BLOOM uses --percdamp, --groupsize, --sym. Add --new-eval if desired.
-COMMON_FLAGS="--groupsize 128 --percdamp 0.01 --new-eval" # Example flags
+COMMON_FLAGS="--groupsize 128 --percdamp 0.01" # Example flags
 
 # List of quantizers to test (match choices in bloom.py)
 QUANTIZERS=("uniform_minmax" "apot" "lloydmax" "logarithm" "quantile" "kmeans") # All 6 quantizers
