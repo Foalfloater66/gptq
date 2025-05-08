@@ -385,7 +385,6 @@ def opt_sequential(model, dataloader, quantizer_name, dev):
     else:
         print("\nSkipping 4-bit kernel benchmark (CUDA module not found).")
 
-# TODO: perform packing on GPU
 def opt_pack3(model, quantizers_with_w):
     """Packs OPT model weights into 3-bit Quant3Linear layers."""
     # Create a new dict containing only (scale, zero) needed by make_quant3
@@ -687,11 +686,6 @@ if __name__ == '__main__':
         '--quiet', action='store_true',
         help='Reduce verbose logging during quantization and evaluation.'
     )
-    # Remove benchmark-kernels, use --benchmark for model inference benchmark
-    # parser.add_argument(
-    #     '--benchmark-kernels', action='store_true',
-    #     help='Run low-level CUDA kernel benchmarks instead of model evaluation.'
-    # )
 
     args = parser.parse_args()
 
